@@ -7,6 +7,15 @@ type Config struct {
 	Env      string
 	Port     string
 	LogLevel string
+	Database DatabaseConfig
+}
+
+type DatabaseConfig struct {
+	Host     string
+	Port     string
+	User     string
+	Password string
+	Name     string
 }
 
 func Load() Config {
@@ -15,6 +24,13 @@ func Load() Config {
 		Env:      getEnv("APP_ENV", "development"),
 		Port:     getEnv("APP_PORT", "8080"),
 		LogLevel: getEnv("LOG_LEVEL", "info"),
+		Database: DatabaseConfig{
+			Host:     getEnv("DB_HOST", "localhost"),
+			Port:     getEnv("DB_PORT", "3307"),
+			User:     getEnv("DB_USER", "bili_app"),
+			Password: os.Getenv("DB_PASSWORD"),
+			Name:     getEnv("DB_NAME", "bili_support"),
+		},
 	}
 }
 

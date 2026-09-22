@@ -4,6 +4,7 @@ import (
 	"log"
 
 	"video-support-agent/internal/config"
+	"video-support-agent/internal/database"
 	"video-support-agent/internal/logger"
 	"video-support-agent/internal/router"
 
@@ -28,11 +29,26 @@ func main() {
 		_ = appLogger.Sync()
 	}()
 
-	r := router.New(cfg)
+	db, err := database.OpenMySQL(cfg.Database)
+	if err != nil {
+		appLogger.Error("initialize database failed", zap.Error(err))
+		return
+	}
 
-	appLogger.Info(
-		"starting API server",
-	)
+	sqlDB, err := db.DB()
+	if err != nil {
+		appLogger.Error("get database connection pool failed", zap.Error(err))
+		return
+	}
+	defer func() {
+		_ = sqlDB.Close()
+	}()
+
+	appLogger.Info("database connected")
+
+	r := router.New(cfg, db)
+
+	appLogger.Info("starting API server")
 
 	appLogger.Info(
 		"server configuration",
@@ -44,9 +60,5 @@ func main() {
 
 	if err := r.Run(":" + cfg.Port); err != nil {
 		appLogger.Fatal("API server stopped", zap.Error(err))
-	}
-
-	if err := r.Run(":" + cfg.Port); err != nil {
-		appLogger.Fatal("API server stopped")
 	}
 }

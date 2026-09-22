@@ -1,0 +1,17 @@
+name: bili-support
+
+services:
+  mysql:
+    image: mysql:8.4.11
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?required}
+      MYSQL_DATABASE: bili_support
+      MYSQL_USER: bili_app
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data:
