@@ -16,7 +16,7 @@ func TestHealthEndpoint(t *testing.T) {
 		LogLevel: "info",
 	}
 
-	r := New(cfg, nil)
+	r := New(cfg, nil, nil, nil, nil, nil, nil)
 
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	recorder := httptest.NewRecorder()

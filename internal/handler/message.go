@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"video-support-agent/internal/middleware"
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
 
@@ -24,6 +25,12 @@ type createMessageRequest struct {
 }
 
 func (h *MessageHandler) Create(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		writeError(c, service.ErrUnauthorized)
+		return
+	}
+
 	conversationID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || conversationID == 0 {
 		writeError(c, service.ErrInvalidArgument)
@@ -32,12 +39,13 @@ func (h *MessageHandler) Create(c *gin.Context) {
 
 	var request createMessageRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, service.ErrInvalidArgument)
+		writeBindError(c, err)
 		return
 	}
 
 	message, err := h.service.Create(
 		c.Request.Context(),
+		userID,
 		conversationID,
 		request.Content,
 	)
@@ -50,6 +58,12 @@ func (h *MessageHandler) Create(c *gin.Context) {
 }
 
 func (h *MessageHandler) List(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		writeError(c, service.ErrUnauthorized)
+		return
+	}
+
 	conversationID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || conversationID == 0 {
 		writeError(c, service.ErrInvalidArgument)
@@ -58,6 +72,7 @@ func (h *MessageHandler) List(c *gin.Context) {
 
 	messages, err := h.service.ListByConversationID(
 		c.Request.Context(),
+		userID,
 		conversationID,
 	)
 	if err != nil {

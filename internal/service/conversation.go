@@ -57,7 +57,11 @@ func (s *ConversationService) Create(ctx context.Context, userID uint64, title s
 
 }
 
-func (s *ConversationService) GetByID(ctx context.Context, id uint64) (*model.Conversation, error) {
+func (s *ConversationService) GetByID(ctx context.Context, userID uint64, id uint64) (*model.Conversation, error) {
+	if userID == 0 {
+		return nil, ErrUnauthorized
+	}
+
 	if id == 0 {
 		return nil, fmt.Errorf("%w: conversation id must be positive", ErrInvalidArgument)
 	}
@@ -65,6 +69,10 @@ func (s *ConversationService) GetByID(ctx context.Context, id uint64) (*model.Co
 	conversation, err := s.conversations.GetByID(ctx, id)
 	if err != nil {
 		return nil, normalizeConversationError(err)
+	}
+
+	if conversation.UserID != userID {
+		return nil, ErrConversationNotFound
 	}
 
 	return conversation, nil

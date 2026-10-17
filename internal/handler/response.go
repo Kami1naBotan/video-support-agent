@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"video-support-agent/internal/service"
@@ -17,8 +18,11 @@ func writeError(c *gin.Context, err error) {
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "internal server error"
-
 	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		status = http.StatusGatewayTimeout
+		code = "request_timeout"
+		message = "request timed out"
 	case errors.Is(err, service.ErrInvalidArgument):
 		status = http.StatusBadRequest
 		code = "invalid_argument"
@@ -35,10 +39,36 @@ func writeError(c *gin.Context, err error) {
 		status = http.StatusNotFound
 		code = "message_not_found"
 		message = "message not found"
+	case errors.Is(err, service.ErrUsernameExists):
+		status = http.StatusConflict
+		code = "username_exists"
+		message = "username already exists"
+	case errors.Is(err, service.ErrInvalidCredentials):
+		status = http.StatusUnauthorized
+		code = "invalid_credentials"
+		message = "invalid username or password"
+	case errors.Is(err, service.ErrUnauthorized):
+		status = http.StatusUnauthorized
+		code = "unauthorized"
+		message = "authentication required"
+		c.Header("WWW-Authenticate", "Bearer")
 	}
 
 	c.JSON(status, ErrorResponse{
 		Code:    code,
 		Message: message,
 	})
+}
+
+func writeBindError(c *gin.Context, err error) {
+
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+		c.JSON(http.StatusRequestEntityTooLarge, ErrorResponse{
+			Code:    "request_too_large",
+			Message: "request body too large",
+		})
+		return
+	}
+
+	writeError(c, service.ErrInvalidArgument)
 }

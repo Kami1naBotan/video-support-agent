@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"video-support-agent/internal/middleware"
 	"video-support-agent/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -19,21 +20,25 @@ func NewConversationHandler(conversationService *service.ConversationService) *C
 }
 
 type createConversationRequest struct {
-	UserID uint64 `json:"user_id"`
-	Title  string `json:"title"`
+	Title string `json:"title"`
 }
 
 func (h *ConversationHandler) Create(c *gin.Context) {
-	var request createConversationRequest
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		writeError(c, service.ErrUnauthorized)
+		return
+	}
 
+	var request createConversationRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
-		writeError(c, service.ErrInvalidArgument)
+		writeBindError(c, err)
 		return
 	}
 
 	conversation, err := h.service.Create(
 		c.Request.Context(),
-		request.UserID,
+		userID,
 		request.Title,
 	)
 	if err != nil {
@@ -45,13 +50,19 @@ func (h *ConversationHandler) Create(c *gin.Context) {
 }
 
 func (h *ConversationHandler) GetByID(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		writeError(c, service.ErrUnauthorized)
+		return
+	}
+
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || id == 0 {
 		writeError(c, service.ErrInvalidArgument)
 		return
 	}
 
-	conversation, err := h.service.GetByID(c.Request.Context(), id)
+	conversation, err := h.service.GetByID(c.Request.Context(), userID, id)
 	if err != nil {
 		writeError(c, err)
 		return

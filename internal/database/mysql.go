@@ -11,6 +11,7 @@ import (
 	driver "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 func OpenMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
@@ -27,8 +28,13 @@ func OpenMySQL(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	dsn.ParseTime = true
 	dsn.Loc = time.UTC
 	dsn.Timeout = 5 * time.Second
+	dsn.ReadTimeout = 5 * time.Second
+	dsn.WriteTimeout = 5 * time.Second
 
-	db, err := gorm.Open(mysql.Open(dsn.FormatDSN()), &gorm.Config{})
+	db, err := gorm.Open(mysql.Open(dsn.FormatDSN()), &gorm.Config{
+		Logger:               gormlogger.Default.LogMode(gormlogger.Silent),
+		DisableAutomaticPing: true,
+	})
 
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)

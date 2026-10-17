@@ -8,6 +8,8 @@ type Config struct {
 	Port     string
 	LogLevel string
 	Database DatabaseConfig
+	Redis    RedisConfig
+	JWT      JWTConfig
 }
 
 type DatabaseConfig struct {
@@ -18,6 +20,18 @@ type DatabaseConfig struct {
 	Name     string
 }
 
+type RedisConfig struct {
+	Addr     string
+	Password string
+	DB       int
+}
+
+type JWTConfig struct {
+	Secret string
+	Issuer string
+	TTL    string
+}
+
 func Load() Config {
 	return Config{
 		AppName:  getEnv("APP_NAME", "bilibili-support-agent-api"),
@@ -25,11 +39,21 @@ func Load() Config {
 		Port:     getEnv("APP_PORT", "8080"),
 		LogLevel: getEnv("LOG_LEVEL", "info"),
 		Database: DatabaseConfig{
-			Host:     getEnv("DB_HOST", "localhost"),
+			Host:     getEnv("DB_HOST", "127.0.0.1"),
 			Port:     getEnv("DB_PORT", "3307"),
 			User:     getEnv("DB_USER", "bili_app"),
 			Password: os.Getenv("DB_PASSWORD"),
 			Name:     getEnv("DB_NAME", "bili_support"),
+		},
+		Redis: RedisConfig{
+			Addr:     getEnv("REDIS_ADDR", "127.0.0.1:6379"),
+			Password: os.Getenv("REDIS_PASSWORD"),
+			DB:       0,
+		},
+		JWT: JWTConfig{
+			Secret: os.Getenv("JWT_SECRET"),
+			Issuer: getEnv("JWT_ISSUER", "bili-support"),
+			TTL:    getEnv("JWT_TTL", "2h"),
 		},
 	}
 }

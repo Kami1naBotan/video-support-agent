@@ -2,10 +2,12 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
+	"video-support-agent/internal/service"
 
 	"video-support-agent/internal/config"
 	"video-support-agent/internal/database"
@@ -106,5 +108,67 @@ func TestMessageRepositoryMySQL(t *testing.T) {
 	}
 	if got[0].Content != want.Content {
 		t.Fatalf("expected content %q, got %q", want.Content, got[0].Content)
+	}
+}
+
+func TestUserRepositoryDuplicateUsernameMySQL(t *testing.T) {
+	if os.Getenv("RUN_MYSQL_TESTS") != "1" {
+		t.Skip("set RUN_MYSQL_TESTS=1 to run MySQL integration tests")
+	}
+
+	cfg := config.Load()
+	if cfg.Database.Name != "bili_support_test" {
+		t.Fatal("integration tests require DB_NAME=bili_support_test")
+	}
+
+	db, err := database.OpenMySQL(cfg.Database)
+	if err != nil {
+		t.Fatalf("connect database: %v", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get connection pool: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = sqlDB.Close()
+	})
+
+	if err := database.Migrate(db); err != nil {
+		t.Fatalf("migrate test database: %v", err)
+	}
+
+	tx := db.Begin()
+	if tx.Error != nil {
+		t.Fatalf("begin transaction: %v", tx.Error)
+	}
+	t.Cleanup(func() {
+		if err := tx.Rollback().Error; err != nil {
+			t.Errorf("rollback test transaction: %v", err)
+		}
+	})
+
+	ctx := context.Background()
+
+	users := NewUserRepository(tx)
+
+	username := fmt.Sprintf("test-%d", time.Now().UnixNano())
+	first := &model.User{
+		Username: username,
+	}
+	if err := users.Create(ctx, first); err != nil {
+		t.Fatalf("create first user: %v", err)
+	}
+	if first.ID == 0 {
+		t.Fatal("expected database-generated user id")
+	}
+
+	duplicate := &model.User{
+		Username: username,
+	}
+	err = users.Create(ctx, duplicate)
+
+	if !errors.Is(err, service.ErrUsernameExists) {
+		t.Fatalf("expected errors.Is(err, service.ErrUsernameExists), got %v", err)
 	}
 }

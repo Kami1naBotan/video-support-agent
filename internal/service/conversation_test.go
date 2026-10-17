@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"video-support-agent/internal/model"
+
+	"gorm.io/gorm"
 )
 
 type fakeUserStore struct {
@@ -101,16 +103,88 @@ func TestConversationServiceCreateUserNotFound(t *testing.T) {
 	}
 }
 
-func TestConversationServiceGetByIDNotFound(t *testing.T) {
-	users := &fakeUserStore{}
-	conversations := &fakeConversationStore{
-		err: errors.New("record not found"),
+func TestConversationServiceGetByIDOwnership(t *testing.T) {
+	dbErr := errors.New("database unavailable")
+
+	tests := []struct {
+		name    string
+		userID  uint64
+		id      uint64
+		found   *model.Conversation
+		findErr error
+		wantErr error
+	}{
+		{
+			name:   "own conversation",
+			userID: 7,
+			id:     1,
+			found:  &model.Conversation{ID: 1, UserID: 7},
+		},
+		{
+			name:    "another user's conversation",
+			userID:  7,
+			id:      1,
+			found:   &model.Conversation{ID: 1, UserID: 8},
+			wantErr: ErrConversationNotFound,
+		},
+		{
+			name:    "missing conversation",
+			userID:  7,
+			id:      1,
+			findErr: gorm.ErrRecordNotFound,
+			wantErr: ErrConversationNotFound,
+		},
+		{
+			name:    "missing identity",
+			userID:  0,
+			id:      1,
+			wantErr: ErrUnauthorized,
+		},
+		{
+			name:    "invalid conversation ID",
+			userID:  7,
+			id:      0,
+			wantErr: ErrInvalidArgument,
+		},
+		{
+			name:    "database failure",
+			userID:  7,
+			id:      1,
+			findErr: dbErr,
+			wantErr: dbErr,
+		},
 	}
-	service := NewConversationService(conversations, users)
 
-	_, err := service.GetByID(context.Background(), 1)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeConversationStore{
+				found: tt.found,
+				err:   tt.findErr,
+			}
+			svc := NewConversationService(store, &fakeUserStore{})
 
-	if err == nil {
-		t.Fatal("expected error")
+			got, err := svc.GetByID(
+				context.Background(),
+				tt.userID,
+				tt.id,
+			)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("expected %v, got %v", tt.wantErr, err)
+				}
+				if got != nil {
+					t.Fatal("failed query must not return conversation data")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got == nil || got.ID != tt.id || got.UserID != tt.userID {
+				t.Fatal("expected the current user's conversation")
+			}
+		})
 	}
 }
