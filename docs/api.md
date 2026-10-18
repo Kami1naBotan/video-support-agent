@@ -1,6 +1,12 @@
 #  API 文档
 
-本地地址：http://127.0.0.1:8080
+后端直连：http://127.0.0.1:8080
+开发代理：http://127.0.0.1:5173/api/v1/...
+Nginx 代理：http://127.0.0.1:8088/api/v1/...
+
+/health 当前仅说明后端直连地址，Nginx 未单独代理该路径。
+文档中的统一 JSON 错误结构由 Gin 返回；
+Nginx 自身产生的错误可能是 HTML，例如 502 或请求体超限的 413。
 
 JSON 请求使用：
 
@@ -28,6 +34,7 @@ Authorization: Bearer <access_token>
 | GET | /api/v1/conversations/:id | 会话所有者 | 200 |
 | POST | /api/v1/conversations/:id/messages | 会话所有者 | 201 |
 | GET | /api/v1/conversations/:id/messages | 会话所有者 | 200 |
+| GET | /api/v1/conversations | 已登录，仅自己的会话 | 200 |
 
 所有受保护接口共享当前用户的限流额度：
 从首次计数开始的 60 秒窗口内允许 60 次请求。
@@ -143,6 +150,17 @@ id、user_id、title、created_at、updated_at。
 
 当前实现中，如果对应用户已不存在，创建会话返回 404、user_not_found。
 
+## 查询会话列表
+
+GET /api/v1/conversations
+
+用户身份来自 JWT，不接受客户端指定查询归属。
+返回当前用户的会话数组，按 id 倒序排列。
+无会话时返回 []，当前未实现分页。
+
+每项包含：
+id、user_id、title、created_at、updated_at。
+
 ## 查询会话
 
 GET /api/v1/conversations/:id
@@ -163,11 +181,27 @@ POST /api/v1/conversations/:id/messages
 消息来源固定为 user，不能由请求指定。
 必须通过会话所有权检查。
 
-成功返回：
+通过会话所有权检查后，后端构造两条消息：
+
+- user：用户提交的内容。
+- assistant：后端固定演示回复。
+
+两条消息在同一个 MySQL 事务中保存。
+任一插入失败时回滚，不保留本次事务中的部分消息。
+
+成功返回 HTTP 201，响应体仍是用户消息对象，包含：
 id、conversation_id、role、content、created_at。
 
-MySQL 保存成功后尝试追加 Redis 上下文。
-上下文更新失败不会改变已保存消息的成功响应。
+客户端随后通过 GET 消息历史获取用户消息和客服回复。
+旧消息不会自动补回复。
+
+MySQL 事务成功后，依次尝试追加两条 Redis 上下文。
+缓存更新失败不改变数据库保存成功的结果；
+两个缓存追加操作不保证原子性。
+
+当前没有请求幂等机制。
+网络超时不能直接判断保存失败，客户端应先查询历史，
+避免自动重试造成重复消息。
 
 ## 查询消息历史
 

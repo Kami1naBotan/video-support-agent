@@ -18,6 +18,7 @@ type messageContextStub struct {
 	message        cache.ContextMessage
 	hasDeadline    bool
 	err            error
+	received       []cache.ContextMessage
 }
 
 func (s *messageContextStub) Append(
@@ -28,6 +29,7 @@ func (s *messageContextStub) Append(
 	s.called = true
 	s.conversationID = conversationID
 	s.message = message
+	s.received = append(s.received, message)
 	_, s.hasDeadline = ctx.Deadline()
 	return s.err
 }
@@ -121,11 +123,23 @@ func TestMessageServiceContextWrite(t *testing.T) {
 			}
 
 			if contexts.called {
-				if contexts.conversationID != 1 ||
-					contexts.message.ID != 10 ||
-					contexts.message.Role != "user" ||
-					contexts.message.Content != "测试消息" {
-					t.Fatal("cache must receive the saved message")
+				if contexts.conversationID != 1 || len(contexts.received) != 2 {
+					t.Fatal("cache must receive both saved messages")
+				}
+
+				first := contexts.received[0]
+				second := contexts.received[1]
+
+				if first.ID != 10 ||
+					first.Role != "user" ||
+					first.Content != "测试消息" {
+					t.Fatal("first cached message must be the user message")
+				}
+
+				if second.ID != 11 ||
+					second.Role != "assistant" ||
+					second.Content != demoReply {
+					t.Fatal("second cached message must be the assistant reply")
 				}
 				if !contexts.hasDeadline {
 					t.Fatal("cache update must have a deadline")
@@ -138,7 +152,7 @@ func TestMessageServiceContextWrite(t *testing.T) {
 
 			wantWarnings := 0
 			if tt.wantWarning {
-				wantWarnings = 1
+				wantWarnings = 2
 			}
 			if warnings != wantWarnings {
 				t.Fatalf(

@@ -109,6 +109,45 @@ func TestMessageRepositoryMySQL(t *testing.T) {
 	if got[0].Content != want.Content {
 		t.Fatalf("expected content %q, got %q", want.Content, got[0].Content)
 	}
+
+	t.Run("pair rollback on second insert failure", func(t *testing.T) {
+		before, err := messages.ListByConversationID(ctx, conversation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		userMessage := &model.Message{
+			ConversationID: conversation.ID,
+			Role:           "user",
+			Content:        "这条消息应该被回滚",
+		}
+
+		assistantMessage := &model.Message{
+			ID:             want.ID, // 故意复用已存在主键，让第二次插入失败
+			ConversationID: conversation.ID,
+			Role:           "assistant",
+			Content:        "触发重复主键",
+		}
+
+		if err := messages.CreatePair(ctx, userMessage, assistantMessage); err == nil {
+			t.Fatal("expected duplicate primary key error")
+		}
+
+		after, err := messages.ListByConversationID(ctx, conversation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(after) != len(before) {
+			t.Fatalf("rollback failed: before=%d after=%d", len(before), len(after))
+		}
+
+		for _, message := range after {
+			if message.ID == userMessage.ID {
+				t.Fatal("first insert survived the failed transaction")
+			}
+		}
+	})
 }
 
 func TestUserRepositoryDuplicateUsernameMySQL(t *testing.T) {

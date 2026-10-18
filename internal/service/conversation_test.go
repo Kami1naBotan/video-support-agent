@@ -22,9 +22,11 @@ func (f *fakeUserStore) Exists(
 }
 
 type fakeConversationStore struct {
-	created *model.Conversation
-	found   *model.Conversation
-	err     error
+	created    *model.Conversation
+	found      *model.Conversation
+	err        error
+	listed     []model.Conversation
+	listUserID uint64
 }
 
 func (f *fakeConversationStore) Create(
@@ -41,6 +43,14 @@ func (f *fakeConversationStore) GetByID(
 	uint64,
 ) (*model.Conversation, error) {
 	return f.found, f.err
+}
+
+func (f *fakeConversationStore) ListByUserID(
+	_ context.Context,
+	userID uint64,
+) ([]model.Conversation, error) {
+	f.listUserID = userID
+	return f.listed, f.err
 }
 
 func TestConversationServiceCreate(t *testing.T) {
@@ -186,5 +196,35 @@ func TestConversationServiceGetByIDOwnership(t *testing.T) {
 				t.Fatal("expected the current user's conversation")
 			}
 		})
+	}
+}
+
+func TestConversationServiceListByUserID(t *testing.T) {
+	store := &fakeConversationStore{
+		listed: []model.Conversation{
+			{ID: 11, UserID: 7, Title: "账号咨询"},
+		},
+	}
+	svc := NewConversationService(store, &fakeUserStore{})
+
+	got, err := svc.ListByUserID(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.listUserID != 7 {
+		t.Fatalf("expected user ID 7, got %d", store.listUserID)
+	}
+	if len(got) != 1 || got[0].ID != 11 {
+		t.Fatalf("unexpected conversations: %+v", got)
+	}
+
+	store.listUserID = 0
+
+	_, err = svc.ListByUserID(context.Background(), 0)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected unauthorized, got %v", err)
+	}
+	if store.listUserID != 0 {
+		t.Fatal("repository must not be called without a user ID")
 	}
 }

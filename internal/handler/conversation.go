@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"video-support-agent/internal/middleware"
+	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -69,4 +70,24 @@ func (h *ConversationHandler) GetByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, conversation)
+}
+
+func (h *ConversationHandler) List(c *gin.Context) {
+	userID, ok := middleware.CurrentUserID(c)
+	if !ok {
+		writeError(c, service.ErrUnauthorized)
+		return
+	}
+
+	conversations, err := h.service.ListByUserID(c.Request.Context(), userID)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+
+	if conversations == nil {
+		conversations = []model.Conversation{}
+	}
+
+	c.JSON(http.StatusOK, conversations)
 }

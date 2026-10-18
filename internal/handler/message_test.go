@@ -346,3 +346,19 @@ func TestMessageHandlerAccessDenied(t *testing.T) {
 		})
 	}
 }
+
+func (f *testMessageStore) CreatePair(
+	_ context.Context,
+	userMessage *model.Message,
+	assistantMessage *model.Message,
+) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	userMessage.ID = 10
+	assistantMessage.ID = 11
+	f.created = userMessage
+
+	return nil
+}

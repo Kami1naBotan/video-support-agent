@@ -35,3 +35,23 @@ func (r *MessageRepository) ListByConversationID(ctx context.Context, conversati
 
 	return messages, nil
 }
+
+func (r *MessageRepository) CreatePair(ctx context.Context, userMessage *model.Message, assistantMessage *model.Message) error {
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Omit("Conversation").Create(userMessage).Error; err != nil {
+			return fmt.Errorf("create user message: %w", err)
+		}
+
+		if err := tx.Omit("Conversation").Create(assistantMessage).Error; err != nil {
+			return fmt.Errorf("create assistant message: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("create message pair: %w", err)
+	}
+
+	return nil
+}

@@ -31,6 +31,13 @@ func main() {
 
 func run() error {
 	cfg := config.Load()
+
+	trustedProxies, proxyErr := config.ValidateTrustedProxies(cfg.TrustedProxies)
+	if proxyErr != nil {
+		return proxyErr
+	}
+	cfg.TrustedProxies = trustedProxies
+
 	if cfg.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	} else {

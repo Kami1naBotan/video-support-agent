@@ -14,6 +14,7 @@ type fakeMessageStore struct {
 	messages []model.Message
 	err      error
 	listed   bool
+	reply    *model.Message
 }
 
 func (f *fakeMessageStore) Create(
@@ -67,6 +68,16 @@ func TestMessageServiceCreate(t *testing.T) {
 
 	if message.Content != "账号被封禁后如何申诉？" {
 		t.Fatalf("expected trimmed content, got %q", message.Content)
+	}
+
+	if messages.reply == nil {
+		t.Fatal("expected an assistant reply")
+	}
+
+	if messages.reply.Role != "assistant" ||
+		messages.reply.ConversationID != message.ConversationID ||
+		messages.reply.Content != demoReply {
+		t.Fatalf("unexpected assistant reply: %+v", messages.reply)
 	}
 }
 
@@ -242,4 +253,21 @@ func TestMessageServiceRejectsUnauthorizedAccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func (f *fakeMessageStore) CreatePair(
+	_ context.Context,
+	userMessage *model.Message,
+	assistantMessage *model.Message,
+) error {
+	if f.err != nil {
+		return f.err
+	}
+
+	userMessage.ID = 10
+	assistantMessage.ID = 11
+	f.created = userMessage
+	f.reply = assistantMessage
+
+	return nil
 }

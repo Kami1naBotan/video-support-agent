@@ -1,15 +1,19 @@
 package config
 
-import "os"
+import (
+	"os"
+	"strings"
+)
 
 type Config struct {
-	AppName  string
-	Env      string
-	Port     string
-	LogLevel string
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
+	AppName        string
+	Env            string
+	Port           string
+	LogLevel       string
+	Database       DatabaseConfig
+	Redis          RedisConfig
+	JWT            JWTConfig
+	TrustedProxies []string
 }
 
 type DatabaseConfig struct {
@@ -55,6 +59,7 @@ func Load() Config {
 			Issuer: getEnv("JWT_ISSUER", "bili-support"),
 			TTL:    getEnv("JWT_TTL", "2h"),
 		},
+		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}
 }
 
@@ -65,4 +70,12 @@ func getEnv(key, fallback string) string {
 	}
 
 	return value
+}
+
+func splitTrustedProxies(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	return strings.Split(raw, ",")
 }

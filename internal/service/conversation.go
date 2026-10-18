@@ -11,6 +11,7 @@ import (
 type ConversationStore interface {
 	Create(context.Context, *model.Conversation) error
 	GetByID(context.Context, uint64) (*model.Conversation, error)
+	ListByUserID(context.Context, uint64) ([]model.Conversation, error)
 }
 
 type UserStore interface {
@@ -76,4 +77,12 @@ func (s *ConversationService) GetByID(ctx context.Context, userID uint64, id uin
 	}
 
 	return conversation, nil
+}
+
+func (s *ConversationService) ListByUserID(ctx context.Context, userID uint64) ([]model.Conversation, error) {
+	if userID == 0 {
+		return nil, ErrUnauthorized
+	}
+
+	return s.conversations.ListByUserID(ctx, userID)
 }

@@ -12,8 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
+const demoReply = "已收到你的咨询。当前为功能演示，尚未接入规则检索与真实模型，暂不提供具体规则结论。"
+
 type MessageStore interface {
-	Create(context.Context, *model.Message) error
+	CreatePair(context.Context, *model.Message, *model.Message) error
 	ListByConversationID(context.Context, uint64) ([]model.Message, error)
 }
 
@@ -60,6 +62,34 @@ func (s *MessageService) checkOwnership(ctx context.Context, userID uint64, conv
 	return nil
 }
 
+func (s *MessageService) appendContext(ctx context.Context, message *model.Message) {
+	if s.contexts == nil {
+		return
+	}
+
+	cacheCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+
+	err := s.contexts.Append(
+		cacheCtx,
+		message.ConversationID,
+		cache.ContextMessage{
+			ID:      message.ID,
+			Role:    message.Role,
+			Content: message.Content,
+		},
+	)
+
+	if err != nil {
+		s.logger.Warn(
+			"update conversation context failed",
+			zap.Uint64("conversation_id", message.ConversationID),
+			zap.Uint64("message_id", message.ID),
+			zap.Error(err),
+		)
+	}
+}
+
 func (s *MessageService) Create(ctx context.Context, userID uint64, conversationID uint64, content string) (*model.Message, error) {
 	if err := s.checkOwnership(ctx, userID, conversationID); err != nil {
 		return nil, err
@@ -70,36 +100,27 @@ func (s *MessageService) Create(ctx context.Context, userID uint64, conversation
 		return nil, fmt.Errorf("%w: content must contain 1 to 10000 characters", ErrInvalidArgument)
 	}
 
-	message := &model.Message{ConversationID: conversationID, Role: "user", Content: content}
-	if err := s.messages.Create(ctx, message); err != nil {
+	userMessage := &model.Message{
+		ConversationID: conversationID,
+		Role:           "user",
+		Content:        content,
+	}
+
+	assistantMessage := &model.Message{
+		ConversationID: conversationID,
+		Role:           "assistant",
+		Content:        demoReply,
+	}
+
+	if err := s.messages.CreatePair(ctx, userMessage, assistantMessage); err != nil {
 		return nil, err
 	}
 
-	if s.contexts != nil {
-		cacheCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-
-		err := s.contexts.Append(
-			cacheCtx,
-			conversationID,
-			cache.ContextMessage{
-				ID:      message.ID,
-				Role:    message.Role,
-				Content: message.Content,
-			},
-		)
-		cancel()
-
-		if err != nil {
-			s.logger.Warn(
-				"update conversation context failed",
-				zap.Uint64("conversation_id", conversationID),
-				zap.Uint64("message_id", message.ID),
-				zap.Error(err),
-			)
-		}
+	for _, message := range []*model.Message{userMessage, assistantMessage} {
+		s.appendContext(ctx, message)
 	}
 
-	return message, nil
+	return userMessage, nil
 }
 
 func (s *MessageService) ListByConversationID(ctx context.Context, userID uint64, conversationID uint64) ([]model.Message, error) {

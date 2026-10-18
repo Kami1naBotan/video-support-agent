@@ -45,6 +45,21 @@ func (f *testConversationStore) GetByID(
 	return f.conversation, f.err
 }
 
+func (f *testConversationStore) ListByUserID(
+	_ context.Context,
+	userID uint64,
+) ([]model.Conversation, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+
+	if f.conversation == nil || f.conversation.UserID != userID {
+		return []model.Conversation{}, nil
+	}
+
+	return []model.Conversation{*f.conversation}, nil
+}
+
 func TestConversationHandlerCreateAuthenticated(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

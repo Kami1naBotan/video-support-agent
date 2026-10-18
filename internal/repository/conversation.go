@@ -35,3 +35,14 @@ func (r *ConversationRepository) GetByID(ctx context.Context, id uint64) (*model
 
 	return &conversation, nil
 }
+
+func (r *ConversationRepository) ListByUserID(ctx context.Context, userID uint64) ([]model.Conversation, error) {
+	conversations := make([]model.Conversation, 0)
+
+	err := r.db.WithContext(ctx).Where("user_id = ?", userID).Order("id DESC").Find(&conversations).Error
+	if err != nil {
+		return nil, fmt.Errorf("list conversations: %w", err)
+	}
+
+	return conversations, nil
+}

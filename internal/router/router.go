@@ -17,9 +17,15 @@ import (
 
 func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger) *gin.Engine {
 	r := gin.New()
-	if err := r.SetTrustedProxies(nil); err != nil {
+
+	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
 		panic("invalid trusted proxy configuration")
 	}
+	if err := r.SetTrustedProxies(trustedProxies); err != nil {
+		panic("invalid trusted proxy configuration")
+	}
+
 	r.Use(middleware.SafeAccessLog(appLogger), middleware.SafeRecovery(appLogger))
 
 	healthHandler := handler.NewHealthHandler(cfg.AppName)
@@ -69,6 +75,7 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 
 	conversations := protected.Group("/conversations")
 	conversations.POST("", conversationHandler.Create)
+	conversations.GET("", conversationHandler.List)
 	conversations.GET("/:id", conversationHandler.GetByID)
 	conversations.POST("/:id/messages", messageHandler.Create)
 	conversations.GET("/:id/messages", messageHandler.List)
