@@ -19,19 +19,27 @@ type messageContextStub struct {
 	hasDeadline    bool
 	err            error
 	received       []cache.ContextMessage
+	listCalled     bool
+	history        []cache.ContextMessage
+	listErr        error
 }
 
-func (s *messageContextStub) Append(
+func (s *messageContextStub) Replace(
 	ctx context.Context,
 	conversationID uint64,
-	message cache.ContextMessage,
+	messages []cache.ContextMessage,
 ) error {
 	s.called = true
 	s.conversationID = conversationID
-	s.message = message
-	s.received = append(s.received, message)
+	s.received = append([]cache.ContextMessage(nil), messages...)
 	_, s.hasDeadline = ctx.Deadline()
-	return s.err
+
+	if s.err != nil {
+		return s.err
+	}
+
+	s.history = append([]cache.ContextMessage(nil), messages...)
+	return nil
 }
 
 func TestMessageServiceContextWrite(t *testing.T) {
@@ -74,7 +82,7 @@ func TestMessageServiceContextWrite(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			messages := &fakeMessageStore{err: tt.dbErr}
+			messages := &fakeMessageStore{saveErr: tt.dbErr}
 			conversations := &fakeConversationStore{
 				found: &model.Conversation{
 					ID:     1,
@@ -89,6 +97,7 @@ func TestMessageServiceContextWrite(t *testing.T) {
 				conversations,
 				contexts,
 				zap.New(core),
+				fakeChatResponder{},
 			)
 
 			got, err := svc.Create(
@@ -152,7 +161,7 @@ func TestMessageServiceContextWrite(t *testing.T) {
 
 			wantWarnings := 0
 			if tt.wantWarning {
-				wantWarnings = 2
+				wantWarnings = 1
 			}
 			if warnings != wantWarnings {
 				t.Fatalf(
@@ -183,7 +192,7 @@ func TestMessageServiceHistoryStillUsesMySQL(t *testing.T) {
 		err: errors.New("redis unavailable"),
 	}
 
-	svc := NewMessageService(messages, conversations, contexts, nil)
+	svc := NewMessageService(messages, conversations, contexts, nil, fakeChatResponder{})
 
 	got, err := svc.ListByConversationID(context.Background(), 7, 1)
 	if err != nil {
@@ -195,4 +204,14 @@ func TestMessageServiceHistoryStillUsesMySQL(t *testing.T) {
 	if contexts.called {
 		t.Fatal("reading history must not append to Redis")
 	}
+}
+
+func (s *messageContextStub) List(
+	_ context.Context,
+	conversationID uint64,
+) ([]cache.ContextMessage, error) {
+	s.listCalled = true
+	s.conversationID = conversationID
+
+	return s.history, s.listErr
 }

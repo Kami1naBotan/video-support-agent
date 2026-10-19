@@ -15,7 +15,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger) *gin.Engine {
+func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder) *gin.Engine {
 	r := gin.New()
 
 	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
@@ -48,7 +48,7 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 	messageRepository := repository.NewMessageRepository(db)
 	conversationService := service.NewConversationService(conversationRepository, userRepository)
 
-	messageService := service.NewMessageService(messageRepository, conversationRepository, contexts, appLogger)
+	messageService := service.NewMessageService(messageRepository, conversationRepository, contexts, appLogger, chat)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 
 	messageHandler := handler.NewMessageHandler(messageService)
@@ -79,5 +79,6 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 	conversations.GET("/:id", conversationHandler.GetByID)
 	conversations.POST("/:id/messages", messageHandler.Create)
 	conversations.GET("/:id/messages", messageHandler.List)
+
 	return r
 }

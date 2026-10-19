@@ -11,6 +11,7 @@ import (
 	"time"
 	"video-support-agent/internal/auth"
 	"video-support-agent/internal/cache"
+	"video-support-agent/internal/llm"
 
 	"video-support-agent/internal/config"
 	"video-support-agent/internal/database"
@@ -21,6 +22,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
+
+const shutdownTimeout = 60 * time.Second
 
 func main() {
 	if err := run(); err != nil {
@@ -111,7 +114,24 @@ func run() error {
 		return errors.New("initialize authentication rate limiter failed")
 	}
 
-	r := router.New(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger)
+	modelTimeout, err := time.ParseDuration(cfg.LLM.Timeout)
+	if err != nil || modelTimeout <= 0 || modelTimeout > 30*time.Second {
+		return errors.New("LLM_TIMEOUT must be positive and no greater than 30s")
+	}
+
+	chatModel, err := llm.NewChatModel(context.Background(), cfg.LLM)
+	if err != nil {
+		return errors.New("initialize LLM model failed; check LLM configuration")
+	}
+
+	chatClient, err := llm.NewChatClient(chatModel, modelTimeout, appLogger)
+	if err != nil {
+		return errors.New("initialize chat client failed")
+	}
+
+	appLogger.Info("LLM client initialized")
+
+	r := router.New(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
 
@@ -146,12 +166,8 @@ func run() error {
 
 	appLogger.Info("shutting down API server")
 
-	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancelShutdown()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		_ = server.Close()
-		return errors.New("HTTP graceful shutdown timed out or failed")
+	if err := shutdownHTTPServer(server, shutdownTimeout); err != nil {
+		return err
 	}
 
 	if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {

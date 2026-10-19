@@ -10,11 +10,14 @@ import (
 )
 
 type fakeMessageStore struct {
-	created  *model.Message
-	messages []model.Message
-	err      error
-	listed   bool
-	reply    *model.Message
+	created       *model.Message
+	messages      []model.Message
+	err           error
+	listed        bool
+	reply         *model.Message
+	saveErr       error
+	saveCalls     int
+	latestChecked bool
 }
 
 func (f *fakeMessageStore) Create(
@@ -42,7 +45,7 @@ func TestMessageServiceCreate(t *testing.T) {
 			UserID: 7,
 		},
 	}
-	service := NewMessageService(messages, conversations, nil, nil)
+	service := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 	message, err := service.Create(
 		context.Background(),
@@ -86,7 +89,7 @@ func TestMessageServiceCreateInvalidArgument(t *testing.T) {
 	conversations := &fakeConversationStore{
 		found: &model.Conversation{ID: 1, UserID: 7},
 	}
-	service := NewMessageService(messages, conversations, nil, nil)
+	service := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 	_, err := service.Create(context.Background(), 7, 1, "   ")
 
@@ -104,7 +107,7 @@ func TestMessageServiceCreateConversationNotFound(t *testing.T) {
 	conversations := &fakeConversationStore{
 		err: gorm.ErrRecordNotFound,
 	}
-	service := NewMessageService(messages, conversations, nil, nil)
+	service := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 	_, err := service.Create(context.Background(), 7, 999, "测试")
 
@@ -137,7 +140,7 @@ func TestMessageServiceListByConversationID(t *testing.T) {
 	conversations := &fakeConversationStore{
 		found: &model.Conversation{ID: 5, UserID: 7},
 	}
-	service := NewMessageService(messages, conversations, nil, nil)
+	service := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 	result, err := service.ListByConversationID(
 		context.Background(),
@@ -164,7 +167,7 @@ func TestMessageServiceListEmpty(t *testing.T) {
 	conversations := &fakeConversationStore{
 		found: &model.Conversation{ID: 5, UserID: 7},
 	}
-	service := NewMessageService(messages, conversations, nil, nil)
+	service := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 	result, err := service.ListByConversationID(
 		context.Background(),
@@ -230,7 +233,7 @@ func TestMessageServiceRejectsUnauthorizedAccess(t *testing.T) {
 				},
 				err: tt.findErr,
 			}
-			svc := NewMessageService(messages, conversations, nil, nil)
+			svc := NewMessageService(messages, conversations, nil, nil, fakeChatResponder{})
 
 			message, err := svc.Create(
 				context.Background(), tt.userID, 1, "测试",
@@ -260,14 +263,66 @@ func (f *fakeMessageStore) CreatePair(
 	userMessage *model.Message,
 	assistantMessage *model.Message,
 ) error {
-	if f.err != nil {
-		return f.err
+	f.saveCalls++
+
+	if f.saveErr != nil {
+		return f.saveErr
 	}
 
 	userMessage.ID = 10
 	assistantMessage.ID = 11
 	f.created = userMessage
 	f.reply = assistantMessage
+	f.messages = append(f.messages, *userMessage, *assistantMessage)
 
 	return nil
+}
+
+func (f *fakeMessageStore) ListRecentByConversationID(
+	_ context.Context,
+	_ uint64,
+	limit int,
+) ([]model.Message, error) {
+	f.listed = true
+
+	if f.err != nil {
+		return nil, f.err
+	}
+	if limit <= 0 || limit > 100 {
+		return nil, errors.New("message limit must be between 1 and 100")
+	}
+
+	start := 0
+	if len(f.messages) > limit {
+		start = len(f.messages) - limit
+	}
+
+	result := make([]model.Message, len(f.messages)-start)
+	copy(result, f.messages[start:])
+
+	return result, nil
+}
+
+func (f *fakeMessageStore) LatestIDByConversationID(
+	_ context.Context,
+	conversationID uint64,
+) (uint64, error) {
+	f.latestChecked = true
+
+	if conversationID == 0 {
+		return 0, errors.New("conversation ID must be positive")
+	}
+	if f.err != nil {
+		return 0, f.err
+	}
+
+	var latestID uint64
+	for _, message := range f.messages {
+		if message.ConversationID == conversationID &&
+			message.ID > latestID {
+			latestID = message.ID
+		}
+	}
+
+	return latestID, nil
 }

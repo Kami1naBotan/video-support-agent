@@ -14,6 +14,7 @@ var (
 	ErrUsernameExists       = errors.New("username already exists")
 	ErrInvalidCredentials   = errors.New("invalid credentials")
 	ErrUnauthorized         = errors.New("unauthorized")
+	ErrConversationBusy     = errors.New("conversation is busy")
 )
 
 func normalizeConversationError(err error) error {

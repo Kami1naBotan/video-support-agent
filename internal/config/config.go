@@ -13,6 +13,7 @@ type Config struct {
 	Database       DatabaseConfig
 	Redis          RedisConfig
 	JWT            JWTConfig
+	LLM            LLMConfig
 	TrustedProxies []string
 }
 
@@ -34,6 +35,13 @@ type JWTConfig struct {
 	Secret string
 	Issuer string
 	TTL    string
+}
+
+type LLMConfig struct {
+	BaseURL string
+	Model   string
+	APIKey  string
+	Timeout string
 }
 
 func Load() Config {
@@ -58,6 +66,12 @@ func Load() Config {
 			Secret: os.Getenv("JWT_SECRET"),
 			Issuer: getEnv("JWT_ISSUER", "bili-support"),
 			TTL:    getEnv("JWT_TTL", "2h"),
+		},
+		LLM: LLMConfig{
+			BaseURL: getEnv("LLM_BASE_URL", ""),
+			Model:   getEnv("LLM_MODEL", ""),
+			APIKey:  os.Getenv("LLM_API_KEY"),
+			Timeout: getEnv("LLM_TIMEOUT", "30s"),
 		},
 		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}

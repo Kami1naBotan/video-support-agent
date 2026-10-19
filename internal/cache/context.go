@@ -89,3 +89,46 @@ func (s *ContextStore) List(ctx context.Context, conversationID uint64) ([]Conte
 
 	return messages, nil
 }
+
+func (s *ContextStore) Replace(ctx context.Context, conversationID uint64, messages []ContextMessage) error {
+	if conversationID == 0 {
+		return fmt.Errorf("conversation ID must be positive")
+	}
+
+	if int64(len(messages)) > s.maxMessages {
+		start := len(messages) - int(s.maxMessages)
+		messages = messages[start:]
+	}
+
+	values := make([]any, 0, len(messages))
+	for _, message := range messages {
+		if message.ID == 0 {
+			return fmt.Errorf("message ID must be positive")
+		}
+
+		data, err := json.Marshal(message)
+		if err != nil {
+			return fmt.Errorf("encode context message: %w", err)
+		}
+
+		values = append(values, string(data))
+	}
+
+	key := contextKey(conversationID)
+
+	_, err := s.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx, key)
+
+		if len(values) > 0 {
+			pipe.RPush(ctx, key, values...)
+			pipe.Expire(ctx, key, s.ttl)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("replace context : %w", err)
+	}
+
+	return nil
+}

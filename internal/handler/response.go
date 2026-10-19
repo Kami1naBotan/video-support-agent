@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"video-support-agent/internal/llm"
 	"video-support-agent/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,20 @@ func writeError(c *gin.Context, err error) {
 	code := "internal_error"
 	message := "internal server error"
 	switch {
+	case errors.Is(err, llm.ErrModelTimeout):
+		status = http.StatusGatewayTimeout
+		code = "model_timeout"
+		message = "模型响应超时，请稍后重试"
+	case errors.Is(err, llm.ErrModelFailed):
+		status = http.StatusBadGateway
+		code = "model_unavailable"
+		message = "模型服务暂时不可用，请稍后重试"
+	case errors.Is(err, llm.ErrEmptyReply):
+		status = http.StatusBadGateway
+		code = "model_empty_reply"
+		message = "模型未返回有效回答，请稍后重试"
+	case errors.Is(err, context.Canceled):
+		return
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
 		code = "request_timeout"
@@ -52,12 +67,16 @@ func writeError(c *gin.Context, err error) {
 		code = "unauthorized"
 		message = "authentication required"
 		c.Header("WWW-Authenticate", "Bearer")
+	case errors.Is(err, service.ErrConversationBusy):
+		status = http.StatusConflict
+		code = "conversation_busy"
+		message = "该会话正在处理上一条消息，请等待完成后再发送"
+	case errors.Is(err, llm.ErrInputTooLarge):
+		status = http.StatusBadRequest
+		code = "model_input_too_large"
+		message = "问题内容超过模型输入预算，请缩短后重试"
 	}
-
-	c.JSON(status, ErrorResponse{
-		Code:    code,
-		Message: message,
-	})
+	c.JSON(status, ErrorResponse{Code: code, Message: message})
 }
 
 func writeBindError(c *gin.Context, err error) {

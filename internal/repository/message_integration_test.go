@@ -77,6 +77,16 @@ func TestMessageRepositoryMySQL(t *testing.T) {
 		t.Fatalf("expected no initial messages, got %d", len(initial))
 	}
 
+	t.Run("latest ID of empty conversation", func(t *testing.T) {
+		latestID, err := messages.LatestIDByConversationID(ctx, conversation.ID)
+		if err != nil {
+			t.Fatalf("query latest ID of empty conversation: %v", err)
+		}
+		if latestID != 0 {
+			t.Fatalf("expected latest ID 0, got %d", latestID)
+		}
+	})
+
 	want := &model.Message{
 		ConversationID: conversation.ID,
 		Role:           "user",
@@ -88,6 +98,16 @@ func TestMessageRepositoryMySQL(t *testing.T) {
 	if want.ID == 0 {
 		t.Fatal("expected database-generated message id")
 	}
+
+	t.Run("latest ID after insert", func(t *testing.T) {
+		latestID, err := messages.LatestIDByConversationID(ctx, conversation.ID)
+		if err != nil {
+			t.Fatalf("query latest ID after insert: %v", err)
+		}
+		if latestID != want.ID {
+			t.Fatalf("expected latest ID %d, got %d", want.ID, latestID)
+		}
+	})
 
 	got, err := messages.ListByConversationID(ctx, conversation.ID)
 	if err != nil {
@@ -109,6 +129,128 @@ func TestMessageRepositoryMySQL(t *testing.T) {
 	if got[0].Content != want.Content {
 		t.Fatalf("expected content %q, got %q", want.Content, got[0].Content)
 	}
+
+	t.Run("history query boundaries and isolation", func(t *testing.T) {
+		// 使用独立会话，避免改变外层测试已有的数据预期。
+		target := &model.Conversation{
+			UserID: user.ID,
+			Title:  "历史查询目标会话",
+		}
+		other := &model.Conversation{
+			UserID: user.ID,
+			Title:  "历史查询隔离会话",
+		}
+
+		for _, item := range []*model.Conversation{target, other} {
+			if err := conversations.Create(ctx, item); err != nil {
+				t.Fatalf("create history test conversation: %v", err)
+			}
+		}
+
+		empty, err := messages.ListRecentByConversationID(ctx, target.ID, 20)
+		if err != nil {
+			t.Fatalf("query empty history: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Fatalf("expected empty history, got %d messages", len(empty))
+		}
+
+		// 超过最大合法 limit=100，才能验证上限确实截断了结果。
+		inserted := make([]model.Message, 105)
+		for i := range inserted {
+			inserted[i] = model.Message{
+				ConversationID: target.ID,
+				Role:           "user",
+				Content:        fmt.Sprintf("历史消息 %d", i),
+			}
+			if err := messages.Create(ctx, &inserted[i]); err != nil {
+				t.Fatalf("create history message %d: %v", i, err)
+			}
+		}
+
+		// 最后插入其他会话消息，使其 ID 大于目标会话的最新 ID。
+		foreign := &model.Message{
+			ConversationID: other.ID,
+			Role:           "user",
+			Content:        "这条消息不能出现在目标会话中",
+		}
+		if err := messages.Create(ctx, foreign); err != nil {
+			t.Fatalf("create other conversation message: %v", err)
+		}
+
+		wantLatest := inserted[len(inserted)-1].ID
+		if foreign.ID <= wantLatest {
+			t.Fatal("test setup requires the other conversation's ID to be larger")
+		}
+
+		t.Run("latest ID respects conversation", func(t *testing.T) {
+			latestID, err := messages.LatestIDByConversationID(ctx, target.ID)
+			if err != nil {
+				t.Fatalf("query latest ID: %v", err)
+			}
+			if latestID != wantLatest {
+				t.Fatalf("expected latest ID %d, got %d", wantLatest, latestID)
+			}
+		})
+
+		for _, limit := range []int{1, 3, 20, 100} {
+			t.Run(fmt.Sprintf("recent limit %d", limit), func(t *testing.T) {
+				got, err := messages.ListRecentByConversationID(ctx, target.ID, limit)
+				if err != nil {
+					t.Fatalf("query recent messages: %v", err)
+				}
+				if len(got) != limit {
+					t.Fatalf("expected %d messages, got %d", limit, len(got))
+				}
+
+				expected := inserted[len(inserted)-limit:]
+				for i, message := range got {
+					if message.ConversationID != target.ID {
+						t.Fatalf("message %d belongs to another conversation", i)
+					}
+					if message.ID != expected[i].ID ||
+						message.Content != expected[i].Content {
+						t.Fatalf(
+							"unexpected message at index %d: expected ID %d, got %d",
+							i, expected[i].ID, message.ID,
+						)
+					}
+				}
+			})
+		}
+
+		t.Run("limit larger than available history", func(t *testing.T) {
+			got, err := messages.ListRecentByConversationID(ctx, other.ID, 20)
+			if err != nil {
+				t.Fatalf("query short history: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("expected 1 message, got %d", len(got))
+			}
+			if got[0].ID != foreign.ID {
+				t.Fatalf("expected ID %d, got %d", foreign.ID, got[0].ID)
+			}
+		})
+
+		for _, limit := range []int{-1, 0, 101} {
+			t.Run(fmt.Sprintf("reject limit %d", limit), func(t *testing.T) {
+				if _, err := messages.ListRecentByConversationID(
+					ctx, target.ID, limit,
+				); err == nil {
+					t.Fatal("invalid limit must return an error")
+				}
+			})
+		}
+
+		t.Run("reject zero conversation ID", func(t *testing.T) {
+			if _, err := messages.ListRecentByConversationID(ctx, 0, 20); err == nil {
+				t.Fatal("recent query must reject zero conversation ID")
+			}
+			if _, err := messages.LatestIDByConversationID(ctx, 0); err == nil {
+				t.Fatal("latest ID query must reject zero conversation ID")
+			}
+		})
+	})
 
 	t.Run("pair rollback on second insert failure", func(t *testing.T) {
 		before, err := messages.ListByConversationID(ctx, conversation.ID)

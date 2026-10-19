@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,6 +53,7 @@ func TestMessageHandlerCreate(t *testing.T) {
 		conversations,
 		nil,
 		nil,
+		testChatResponder{},
 	)
 	handler := NewMessageHandler(messageService)
 
@@ -97,7 +99,7 @@ func TestMessageHandlerCreateInvalidContent(t *testing.T) {
 	messages := &testMessageStore{}
 
 	handler := NewMessageHandler(
-		service.NewMessageService(messages, conversations, nil, nil),
+		service.NewMessageService(messages, conversations, nil, nil, testChatResponder{}),
 	)
 
 	router, token := newMessageTestRouter(t)
@@ -135,6 +137,7 @@ func TestMessageHandlerCreateInvalidID(t *testing.T) {
 			&testConversationStore{},
 			nil,
 			nil,
+			testChatResponder{},
 		),
 	)
 
@@ -184,7 +187,7 @@ func TestMessageHandlerList(t *testing.T) {
 	}
 
 	handler := NewMessageHandler(
-		service.NewMessageService(messages, conversations, nil, nil),
+		service.NewMessageService(messages, conversations, nil, nil, testChatResponder{}),
 	)
 
 	router, token := newMessageTestRouter(t)
@@ -222,7 +225,7 @@ func TestMessageHandlerListConversationNotFound(t *testing.T) {
 	messages := &testMessageStore{}
 
 	handler := NewMessageHandler(
-		service.NewMessageService(messages, conversations, nil, nil),
+		service.NewMessageService(messages, conversations, nil, nil, testChatResponder{}),
 	)
 
 	router, token := newMessageTestRouter(t)
@@ -300,7 +303,7 @@ func TestMessageHandlerAccessDenied(t *testing.T) {
 						},
 					}
 					h := NewMessageHandler(
-						service.NewMessageService(messages, conversations, nil, nil),
+						service.NewMessageService(messages, conversations, nil, nil, testChatResponder{}),
 					)
 
 					router, token := newMessageTestRouter(t)
@@ -361,4 +364,51 @@ func (f *testMessageStore) CreatePair(
 	f.created = userMessage
 
 	return nil
+}
+
+func (f *testMessageStore) ListRecentByConversationID(
+	_ context.Context,
+	_ uint64,
+	limit int,
+) ([]model.Message, error) {
+	f.listed = true
+
+	if f.err != nil {
+		return nil, f.err
+	}
+	if limit <= 0 || limit > 100 {
+		return nil, errors.New("message limit must be between 1 and 100")
+	}
+
+	start := 0
+	if len(f.messages) > limit {
+		start = len(f.messages) - limit
+	}
+
+	result := make([]model.Message, len(f.messages)-start)
+	copy(result, f.messages[start:])
+
+	return result, nil
+}
+
+func (f *testMessageStore) LatestIDByConversationID(
+	_ context.Context,
+	conversationID uint64,
+) (uint64, error) {
+	if conversationID == 0 {
+		return 0, errors.New("conversation ID must be positive")
+	}
+	if f.err != nil {
+		return 0, f.err
+	}
+
+	var latestID uint64
+	for _, message := range f.messages {
+		if message.ConversationID == conversationID &&
+			message.ID > latestID {
+			latestID = message.ID
+		}
+	}
+
+	return latestID, nil
 }
