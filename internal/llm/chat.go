@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
 	"go.uber.org/zap"
 )
 
@@ -27,6 +26,7 @@ type HistoryMessage struct {
 
 type ChatClient struct {
 	generator Generator
+	streamer  Streamer
 	timeout   time.Duration
 	logger    *zap.Logger
 }
@@ -42,71 +42,20 @@ func NewChatClient(generator Generator, timeout time.Duration, logger *zap.Logge
 		logger = zap.NewNop()
 	}
 
+	streamer, _ := generator.(Streamer)
+
 	return &ChatClient{
 		generator: generator,
 		timeout:   timeout,
+		streamer:  streamer,
 		logger:    logger,
 	}, nil
 }
 
 func (c *ChatClient) Reply(ctx context.Context, history []HistoryMessage, question string) (string, error) {
-	question = strings.TrimSpace(question)
-	if question == "" {
-		return "", ErrInvalidInput
-	}
-
-	messages := make([]*schema.Message, 0, len(history)+2)
-	messages = append(messages, schema.SystemMessage(supportSystemPrompt))
-
-	for _, item := range history {
-		content := strings.TrimSpace(item.Content)
-		if content == "" {
-			return "", ErrInvalidInput
-		}
-
-		switch item.Role {
-		case "user":
-			messages = append(messages, schema.UserMessage(content))
-		case "assistant":
-			messages = append(messages, &schema.Message{
-				Role:    schema.Assistant,
-				Content: content,
-			})
-		default:
-			return "", ErrInvalidInput
-		}
-	}
-
-	messages = append(messages, schema.UserMessage(question))
-
-	last := len(messages) - 1
-	requiredBytes := len(messages[0].Content) + len(messages[last].Content)
-	if requiredBytes > maxInputTextBytes {
-		return "", ErrInputTooLarge
-	}
-
-	totalBytes := requiredBytes
-	for _, message := range messages[1:last] {
-		totalBytes += len(message.Content)
-	}
-
-	start := 1
-	for totalBytes > maxInputTextBytes && start < last {
-		totalBytes -= len(messages[start].Content)
-		start++
-
-		for start < last && messages[start].Role != schema.User {
-			totalBytes -= len(messages[start].Content)
-			start++
-		}
-	}
-
-	if start > 1 {
-		trimmed := make([]*schema.Message, 0, len(messages)-start+1)
-		trimmed = append(trimmed, messages[0])
-		trimmed = append(trimmed, messages[start:last]...)
-		trimmed = append(trimmed, messages[last])
-		messages = trimmed
+	messages, err := buildMessage(history, question)
+	if err != nil {
+		return "", err
 	}
 
 	callCtx, cancel := context.WithTimeout(ctx, c.timeout)

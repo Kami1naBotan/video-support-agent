@@ -15,7 +15,7 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-func writeError(c *gin.Context, err error) {
+func classifyResponseError(err error) (int, ErrorResponse) {
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "internal server error"
@@ -32,8 +32,6 @@ func writeError(c *gin.Context, err error) {
 		status = http.StatusBadGateway
 		code = "model_empty_reply"
 		message = "模型未返回有效回答，请稍后重试"
-	case errors.Is(err, context.Canceled):
-		return
 	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
 		code = "request_timeout"
@@ -66,7 +64,6 @@ func writeError(c *gin.Context, err error) {
 		status = http.StatusUnauthorized
 		code = "unauthorized"
 		message = "authentication required"
-		c.Header("WWW-Authenticate", "Bearer")
 	case errors.Is(err, service.ErrConversationBusy):
 		status = http.StatusConflict
 		code = "conversation_busy"
@@ -75,8 +72,34 @@ func writeError(c *gin.Context, err error) {
 		status = http.StatusBadRequest
 		code = "model_input_too_large"
 		message = "问题内容超过模型输入预算，请缩短后重试"
+	case errors.Is(err, llm.ErrStreamUnsupported):
+		status = http.StatusServiceUnavailable
+		code = "stream_unavailable"
+		message = "流式服务暂时不可用"
+	case errors.Is(err, llm.ErrIncompleteReply):
+		status = http.StatusBadGateway
+		code = "model_incomplete_reply"
+		message = "模型回答未完整生成，本轮未保存，请稍后重试"
 	}
-	c.JSON(status, ErrorResponse{Code: code, Message: message})
+
+	return status, ErrorResponse{
+		Code:    code,
+		Message: message,
+	}
+}
+
+func writeError(c *gin.Context, err error) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+
+	status, response := classifyResponseError(err)
+
+	if errors.Is(err, service.ErrUnauthorized) {
+		c.Header("WWW-Authenticate", "Bearer")
+	}
+
+	c.JSON(status, response)
 }
 
 func writeBindError(c *gin.Context, err error) {

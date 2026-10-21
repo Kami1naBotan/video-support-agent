@@ -15,7 +15,8 @@ import {
   listConversationsAPI,
 } from '../api/conversation'
 import type { Conversation } from '../api/conversation'
-import { listMessagesAPI, sendMessageAPI } from '../api/message'
+import { listMessagesAPI } from '../api/message'
+import { streamMessageAPI } from '../api/chat-stream'
 import type { ChatMessage } from '../api/message'
 import {
   errorMessage,
@@ -41,10 +42,46 @@ const loadingMessages = ref(false)
 const sending = ref(false)
 const messageError = ref('')
 
+type StreamStatus =
+    | 'waiting'
+    | 'streaming'
+    | 'completed'
+    | 'stopped'
+    | 'failed'
+
+interface StreamTurn {
+  conversationID: number
+  question: string
+  answer: string
+  status: StreamStatus
+  error: string
+}
+
+const streamTurn = ref<StreamTurn | null>(null)
+
+const completionNotice = ref('')
+
+const currentStream = computed(() => {
+  const turn = streamTurn.value
+
+  return turn?.conversationID === selectedID.value
+      ? turn
+      : null
+})
+
+const streamStatusText: Record<StreamStatus, string> = {
+  waiting: '正在等待客服回答……',
+  streaming: '正在生成回答……',
+  completed: '回答已完成并保存',
+  stopped: '已停止接收，请刷新消息确认保存结果',
+  failed: '本轮回答未确认完成',
+}
+
 const drafts = new Map<number, string>()
 const controllers = new Set<AbortController>()
 
 let messageController: AbortController | null = null
+let streamController: AbortController | null = null
 let messageRequestID = 0
 let disposed = false
 
@@ -76,6 +113,7 @@ function stopPage() {
 
   controllers.clear()
   messageController = null
+  streamController = null
 }
 
 async function handleRequestError(
@@ -222,6 +260,16 @@ async function loadMessages() {
     if (!isCurrentRequest()) return
 
     messages.value = result
+
+    if (
+        currentStream.value !== null &&
+        (
+            !sending.value ||
+            currentStream.value.status === 'completed'
+        )
+    ) {
+      streamTurn.value = null
+    }
   } catch (error) {
     if (!isCurrentRequest()) return
 
@@ -256,44 +304,132 @@ async function sendMessage() {
     return
   }
 
+  // 上一轮展示尚未与历史记录同步，先确认服务端结果。
+  if (currentStream.value !== null) {
+    ElMessage.warning('请先刷新消息确认上一轮结果，再发送新消息')
+    return
+  }
+
   if (!content || [...content].length > 10000) {
     ElMessage.warning('请输入 1～10000 个字符的消息')
     return
   }
 
   const controller = newController()
+  streamController = controller
   sending.value = true
+  messageError.value = ''
+  completionNotice.value = ''
+
+  streamTurn.value = {
+    conversationID,
+    question: content,
+    answer: '',
+    status: 'waiting',
+    error: '',
+  }
+
+  // 从 ref 中取出 Vue 的响应式对象，后续更新才能驱动页面。
+  const turn = streamTurn.value
+
+  function isCurrentStream(): boolean {
+    return (
+        isCurrentPage() &&
+        streamController === controller &&
+        selectedID.value === conversationID &&
+        streamTurn.value === turn
+    )
+  }
 
   try {
-    await sendMessageAPI(
-        conversationID,
-        content,
-        controller.signal,
+    await streamMessageAPI(conversationID, content, {
+      signal: controller.signal,
+
+      onEvent(event) {
+        if (!isCurrentStream() || controller.signal.aborted) return
+
+        switch (event.event) {
+          case 'start':
+            turn.status = 'streaming'
+            break
+
+          case 'token':
+            turn.answer += event.data.content
+            break
+
+          case 'citation':
+            // 今天不实现 RAG，服务端返回空引用数组。
+            break
+
+          case 'error':
+            // 请求层会将它转换为异常，由下面的 catch 统一处理。
+            break
+
+          case 'done':
+            // 等请求层完成协议检查并正常返回，再确认完成状态。
+            break
+        }
+      },
+    })
+
+    if (!isCurrentStream()) return
+
+    turn.status = 'completed'
+    completionNotice.value = '回答已完成并保存'
+    drafts.delete(conversationID)
+    draft.value = ''
+
+    // 使用真实历史记录替换临时展示，获得数据库 ID 和时间。
+    await loadMessages()
+  } catch (error) {
+    if (!isCurrentStream()) return
+
+    if (isCanceled(error)) {
+      turn.status = 'stopped'
+      return
+    }
+
+    turn.status = 'failed'
+
+    const text = await handleRequestError(
+        error,
+        '回答连接异常，请刷新消息确认结果',
     )
 
-    if (!isCurrentPage()) return
-
-    drafts.delete(conversationID)
-
-    if (selectedID.value === conversationID) {
-      draft.value = ''
-      await loadMessages()
-    }
-  } catch (error) {
-    const text = await handleRequestError(error, '发送消息失败')
-
-    if (text !== null && isCurrentPage()) {
-      ElMessage.error(
-          `${text}。如结果不确定，请先刷新消息确认，避免重复发送。`,
-      )
+    // handleRequestError 内可能发生跳转，因此等待后再检查一次。
+    if (text !== null && isCurrentStream()) {
+      turn.error =
+          `${text}。请刷新消息确认保存结果，避免重复发送。`
     }
   } finally {
     releaseController(controller)
 
-    if (isCurrentPage()) {
-      sending.value = false
+    // 旧请求的 finally 不能清除新请求的控制器和加载状态。
+    if (streamController === controller) {
+      streamController = null
+
+      if (isCurrentPage()) {
+        sending.value = false
+      }
     }
   }
+}
+
+function stopGenerating() {
+  if (!isCurrentPage() || !sending.value) return
+
+  const turn = currentStream.value
+  if (
+      turn === null ||
+      turn.status === 'completed' ||
+      turn.status === 'stopped' ||
+      turn.status === 'failed'
+  ) {
+    return
+  }
+
+  turn.status = 'stopped'
+  streamController?.abort()
 }
 
 function selectConversation(id: number) {
@@ -309,6 +445,12 @@ async function handleLogout() {
 
 watch(selectedID, (nextID, previousID) => {
   if (!isCurrentPage()) return
+
+  streamController?.abort()
+  streamController = null
+  sending.value = false
+  streamTurn.value = null
+  completionNotice.value = ''
 
   if (previousID !== null) {
     drafts.set(previousID, draft.value)
@@ -437,6 +579,9 @@ onBeforeUnmount(stopPage)
             <p v-if="loadingMessages" role="status">
               正在加载消息……
             </p>
+            <p v-if="completionNotice" class="stream-status" role="status">
+              {{ completionNotice }}
+            </p>
 
             <el-alert
                 v-if="messageError"
@@ -447,7 +592,7 @@ onBeforeUnmount(stopPage)
             />
 
             <el-empty
-                v-if="!loadingMessages && !messageError && messages.length === 0"
+                v-if="!loadingMessages &&!messageError &&messages.length === 0 &&!currentStream"
                 description="还没有消息，发送第一条咨询吧"
                 :image-size="70"
             />
@@ -465,6 +610,39 @@ onBeforeUnmount(stopPage)
 
                 <div class="message-content">{{ message.content }}</div>
               </li>
+              <template v-if="currentStream">
+                <li class="message-item from-user">
+                  <div class="message-role">我</div>
+                  <div class="message-content">{{ currentStream.question }}</div>
+                </li>
+
+                <li
+                    class="message-item"
+                    :aria-busy="
+        currentStream.status === 'waiting' ||
+        currentStream.status === 'streaming'
+      "
+                >
+                  <div class="message-role">客服</div>
+
+                  <div
+                      v-if="currentStream.answer"
+                      class="message-content"
+                  >{{ currentStream.answer }}</div>
+
+                  <p class="stream-status" role="status">
+                    {{ streamStatusText[currentStream.status] }}
+                  </p>
+
+                  <el-alert
+                      v-if="currentStream.error"
+                      :title="currentStream.error"
+                      type="error"
+                      :closable="false"
+                      show-icon
+                  />
+                </li>
+              </template>
             </ul>
 
             <el-form @submit.prevent="sendMessage">
@@ -484,6 +662,13 @@ onBeforeUnmount(stopPage)
                     :disabled="sending || loadingMessages || !draft.trim()"
                 >
                   发送
+                </el-button>
+                <el-button
+                    v-if="sending &&currentStream &&(currentStream.status === 'waiting' || currentStream.status === 'streaming')"
+                    native-type="button"
+                    @click="stopGenerating"
+                >
+                  停止生成
                 </el-button>
               </div>
             </el-form>
@@ -614,5 +799,11 @@ onBeforeUnmount(stopPage)
   display: flex;
   justify-content: flex-end;
   margin-top: 12px;
+}
+
+.stream-status {
+  margin: 8px 0;
+  color: #606266;
+  font-size: 12px;
 }
 </style>

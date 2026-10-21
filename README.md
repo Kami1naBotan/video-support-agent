@@ -3,13 +3,15 @@
 基于 Bilibili 公开规则资料规划的个人学习项目，非官方客服服务。
 
 当前完成用户认证、会话与消息管理、Redis 缓存与限流、
-Vue 3 客服前端、Nginx 代理，以及基于 Eino 的非流式模型问答。
+Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 流式模型问答。
 
 模型调用前读取最近历史，成功后通过 MySQL 事务保存用户消息和模型回答，
 再读取已提交的最近消息，整体更新 Redis 上下文快照。
 
-当前只实现模型问答，尚未接入 SSE、规则知识库、RAG、工具调用、
-Kafka 和 Kubernetes。项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
+当前已实现模型问答和 SSE 流式输出，尚未接入规则知识库、RAG、
+工具调用、Kafka 和 Kubernetes。
+
+项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
 
 ## 当前技术栈
 
@@ -38,6 +40,11 @@ Eino、Eino OpenAI 兼容模型适配器。
 - 消息历史、消息发送、加载状态与错误提示。
 - 模型生成成功后，用户消息与模型回答在同一个 MySQL 事务中保存。
 - Nginx 托管 Vue 构建产物，并代理 /api 请求到 Gin。
+- Eino 流式读取，通过 Gin SSE 推送模型回答。
+- start、token、citation、error、done 五类流式事件。
+- Vue 使用 Fetch 读取响应流，支持生成状态、主动停止和会话切换取消。
+- 流式回答完整生成后，通过 MySQL 事务保存本轮问答。
+- Nginx 关闭 API 响应缓冲与缓存，支持 SSE 转发。
 
 角色验证接口只返回当前用户信息，不包含客服坐席或管理业务。
 客服和管理员不会自动获得访问他人会话的权限。
@@ -233,30 +240,198 @@ Authorization: Bearer <access_token>
 
 会话归属来自 JWT，不能通过请求体中的 user_id 指定。
 
+## SSE 流式聊天
+
+### 请求与事件协议
+
+接口：
+
+```text
+POST /api/v1/conversations/:id/messages/stream
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+请求体：
+
+```json
+{"content":"请介绍你可以提供的帮助"}
+```
+
+响应采用 UTF-8 编码，每个事件以空行结束：
+
+```text
+event: token
+data: {"content":"你好"}
+```
+
+| 事件 | data 示例 | 含义 |
+|---|---|---|
+| start | `{"conversation_id":1}` | 开始本轮流式处理 |
+| token | `{"content":"你好"}` | 新增文本片段，不保证对应单个字或单个模型 Token |
+| citation | `{"items":[]}` | 引用信息；当前未实现 RAG，固定为空数组 |
+| error | `{"code":"model_timeout","message":"模型响应超时，请稍后重试"}` | 本轮处理失败 |
+| done | `{"user_message_id":10,"assistant_message_id":11}` | 本轮问答已成功提交 MySQL |
+
+正常事件顺序为：
+
+```text
+start → token（零个或多个）→ citation → done
+```
+
+流开始前失败，返回 HTTP 错误状态和 JSON。
+流开始后失败，通过 error 事件报告，不再发送 done；
+客户端断开时，服务端可能无法继续发送任何事件。
+
+HTTP 200 只表示流式响应已经开始，不代表回答生成或保存成功。
+连接结束但未收到 done 时，应查询历史确认，不能自动重试提交。
+
+### 前端读取方式
+
+SSE 仍是 HTTP 响应，但服务端持续写入事件并及时 Flush，
+客户端可以在响应结束前处理新增内容。
+
+当前接口需要 POST JSON 和 Bearer 认证，因此前端使用
+Fetch + ReadableStream + TextDecoder 读取 SSE，没有使用原生 EventSource。
+当前客户端不提供断线重连或断点续传。
+
+SSE 适合“客户端提交一次问题、服务端持续推送回答”的场景。
+WebSocket 更适合需要持续双向通信的场景，例如实时语音和协同操作。
+
+### 取消与保存边界
+
+请求 Context 传递给 Service 和 Eino 模型调用。
+客户端断开或主动停止后，支持 Context 的下游操作响应取消，
+流式读取退出并关闭 reader。
+
+Context 是协作式取消机制，不会强制终止任意阻塞代码，
+也不保证远程模型平台停止推理或计费。
+
+模型生成过程中失败或取消，不保存本轮问答。
+完整生成成功后，保存使用 context.WithoutCancel 派生的独立 Context，
+并设置 3 秒超时。因此进入保存阶段后，即使客户端断开，
+本轮问答仍可能成功保存。
+
+done 仅在事务提交成功后发送。
+停止接收不等于数据库回滚，应刷新历史确认最终结果。
+
+回答先在内存中累积，完成后一次事务保存用户消息和助手消息。
+不逐 Token 写数据库，以减少数据库往返、更新与锁开销，
+并避免把尚未完整生成的回答当成正式历史记录。
+
+当前流式实现要求模型结束原因为 stop。
+输出达到长度上限等非正常结束情形会报告失败，不保存部分回答。
+
+### Nginx 配置
+
+/api/ 代理已配置：
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Connection "";
+proxy_buffering off;
+proxy_cache off;
+gzip off;
+proxy_ignore_client_abort off;
+```
+
+proxy_buffering 控制响应是否积攒后转发；
+proxy_cache 控制响应是否缓存并复用，二者不同。
+
+proxy_read_timeout 55s 是两次读取上游数据之间的等待超时，
+不是整个响应的总时长限制。
+
+修改配置后先执行 nginx -t，成功后再 reload。
+
+### PowerShell 使用 curl 调试
+
+前提：后端及 Nginx 已启动，已有登录 Token 和属于当前用户的会话。
+在本机浏览器开发者工具的 Session Storage 中取得
+bili_support_token；不要将真实 Token 写入文档或提交到仓库。
+
+以下命令在项目根目录执行：
+
+```powershell
+$sseBaseURL = 'http://127.0.0.1:8088'
+$sseConversationID = Read-Host '输入当前用户的会话 ID'
+$sseToken = Read-Host '输入登录 Token'
+$sseBodyPath = [System.IO.Path]::GetTempFileName()
+
+try {
+    [System.IO.File]::WriteAllText(
+        $sseBodyPath,
+        '{"content":"Please reply in three short paragraphs."}',
+        [System.Text.UTF8Encoding]::new($false)
+    )
+
+    curl.exe --no-buffer --include `
+        --request POST `
+        "$sseBaseURL/api/v1/conversations/$sseConversationID/messages/stream" `
+        --header "Authorization: Bearer $sseToken" `
+        --header "Content-Type: application/json" `
+        --header "Accept: text/event-stream" `
+        --data-binary "@$sseBodyPath"
+} finally {
+    Remove-Item -LiteralPath $sseBodyPath -ErrorAction SilentlyContinue
+    Remove-Variable sseToken -ErrorAction SilentlyContinue
+}
+```
+
+--no-buffer（即 -N）关闭 curl 自身的输出缓冲，
+--include（即 -i）显示 HTTP 响应头。
+
+正常情况下可持续看到 start、token、citation、done。
+输出阶段按 Ctrl+C 可以模拟客户端断开。
+
+将 sseBaseURL 改为 http://127.0.0.1:8080，
+可对比直连 Gin 与经过 Nginx 的行为。
+每次执行都会发起新的聊天请求，不是回放已有回答。
+
+若直连可以流式显示，而代理入口集中输出，
+检查 Nginx 生效配置、是否已 reload，以及响应缓冲和压缩配置。
+
 ## 当前架构
 
 ```mermaid
 flowchart TD
-    Browser["浏览器：Vue 3 页面"]
+    Browser["Vue 3 聊天页面"]
+    Vite["Vite :5173"]
+    Nginx["Nginx :8088<br/>关闭 API 响应缓冲和缓存"]
+    Dist["frontend/dist"]
+    Gin["Gin :8080<br/>认证、限流、请求校验"]
+    Handler["SSE Handler<br/>事件编码、Write、Flush"]
+    Service["MessageService<br/>归属检查、会话占用、历史读取"]
+    Chat["Eino ChatClient<br/>输入预算、超时、流读取、完整性检查"]
+    Model["OpenAI 兼容模型服务"]
+    Repository["GORM Repository<br/>事务保存本轮问答"]
+    MySQL[("MySQL<br/>完整消息历史")]
+    Redis[("Redis<br/>上下文快照与限流")]
+    Done["保存成功后发送 citation、done"]
 
-    Browser --> Vite["开发入口：Vite :5173"]
-    Browser --> Nginx["验收入口：Nginx :8088"]
+    Browser -->|"开发入口"| Vite
+    Browser -->|"验收入口"| Nginx
+    Nginx -->|"静态文件"| Dist
+    Vite --> Gin
+    Nginx --> Gin
+    Gin --> Handler
+    Handler --> Service
+    Service --> Chat
+    Chat --> Model
 
-    Vite -->|"保留 /api/v1 路径"| Gin["Gin :8080"]
-    Nginx -->|"静态资源"| Dist["frontend/dist"]
-    Nginx -->|"保留 /api/v1 路径"| Gin
+    Model -.->|"流式片段"| Chat
+    Chat -.->|"onChunk"| Service
+    Service -.->|"回调发送 token"| Handler
+    Handler -.->|"SSE 经所选入口返回"| Browser
 
-    Gin --> Auth["JWT / 限流 / 参数校验"]
-    Auth --> Handler["Handler"]
-    Handler --> Service["Service：归属检查、会话占用、历史校验、事务保存"]
-    Service --> Chat["ChatClient：Prompt、输入预算、超时、错误处理"]
-    Chat --> Eino["Eino ChatModel"]
-    Eino --> LLM["OpenAI 兼容模型服务"]
-    Service --> Repository["Repository / GORM：最新 ID、最近历史、消息事务"]
-    Repository --> MySQL[("MySQL：事务保存用户消息与客服回复")]
+    Chat -->|"返回完整回答"| Service
+    Service -->|"生成成功后调用"| Repository
+    Repository --> MySQL
+    Service -->|"读取与提交后刷新"| Redis
+    Gin -->|"限流"| Redis
 
-    Service -->|"读取历史 / 提交后替换快照"| Redis[("Redis：上下文")]
-    Auth -->|"限流计数"| Redis
+    Repository -->|"提交成功，结果返回 Service"| Done
+    Done --> Handler
 ```
 
 健康检查直接返回 HTTP 服务状态，不经过上述 API 认证与限流链路。
@@ -307,7 +482,9 @@ GET 消息历史接口始终读取 MySQL，当前尚未实现分页，也不负�
   正文总量不得超过 32 KiB（32768 个 UTF-8 字节）。
 - 超限时从最旧一轮开始移除历史，保留最近的连续历史。
 - 系统 Prompt 和当前问题完整保留；仅这两项就超限时，
-  返回 HTTP 400、model_input_too_large，不调用模型。
+  返回 model_input_too_large，不调用上游模型。
+  普通接口返回 HTTP 400；当前流式接口的预算检查发生在 start 之后，
+  因此通过 HTTP 200 响应中的 error 事件报告。
 - 裁剪只影响本次模型输入，不删除 MySQL 或 Redis 中的历史。
 
 32 KiB 是文本字节预算，不是精确 Token 数，也不包含 JSON 编码开销。
@@ -343,16 +520,19 @@ API 支持直接访问，也可经 Vite 或 Nginx 代理访问。
 
 请求 Context 期限为 40 秒，用于取消支持 Context 的下游操作。
 它不能强制中断 bcrypt 运算，也不保证所有超时都返回 504。
-业务错误处理中识别到 context.DeadlineExceeded 时返回 504；
+业务错误处理中识别到 context.DeadlineExceeded 时，
+若响应尚未开始则返回 504；SSE 已开始时通过 error 事件报告。
 Redis 限流检查失败仍返回 503。
 模型调用最多等待 30 秒；API 请求 Context 为 40 秒；
 HTTP Server WriteTimeout 为 50 秒；
-Nginx proxy_read_timeout 为 55 秒；Axios timeout 为 60 秒。
+Nginx proxy_read_timeout 为 55 秒；
+普通 Axios 请求 timeout 为 60 秒；
+Fetch 流式请求通过 AbortSignal.timeout 设置 60 秒总超时。
+SSE 开始后的业务错误通过 error 事件报告，不能再修改 HTTP 状态码。
 
 这些配置的计时语义不同，不等同于统一的总请求时限。
 请求取消通过 Context 传递，不保证已经提交的数据库操作回滚。
 
-HTTP Server 设置连接读写超时。
 HTTP Server 设置连接读写超时。
 服务收到退出信号后停止接收新连接，最多等待 60 秒让在途请求完成。
 超过期限时强制关闭 HTTP 连接，再释放 Redis 客户端、MySQL 连接池及日志资源。
@@ -372,15 +552,78 @@ Nginx 内置错误日志仍可能包含请求 URI，不能将凭证或正文放�
 取消请求不代表服务器操作已回滚。
 创建会话和发送消息不自动重试，结果不确定时先查询历史。
 
-模型调用失败时，内部日志记录固定文本和 error_kind 分类，
-包括认证、权限、限流或配额、上游故障、请求拒绝、超时、取消、
-网络故障和未知错误，不记录供应商原始错误正文或完整模型配置。
-对外仍返回统一业务错误，不暴露内部详情。
+普通模型调用在失败时记录固定日志文本和 error_kind，
+不记录供应商原始错误正文或完整模型配置。
+
+流式调用分别记录模型阶段和 Service 处理阶段的结束结果：
+
+| 日志 | 字段 | 含义 |
+|---|---|---|
+| model stream failed | error_kind | 上游错误分类，例如认证、限流或网络错误 |
+| model stream finished | outcome、duration | 模型流式处理的最终结果和耗时 |
+| chat stream finished | stage、outcome、saved、duration | Service 结束阶段、结果及是否确认保存成功 |
+
+模型阶段正常返回时，输出一条 model stream finished。
+上游调用失败时可能额外输出一条 model stream failed，
+两条日志分别描述失败原因与阶段结果。
+
+常见 Service 日志结果：
+
+| 场景 | stage | outcome | saved |
+|---|---|---|---|
+| 正常保存 | completed | success | true |
+| 模型超时 | generate | timeout | false |
+| 生成阶段响应取消 | generate | canceled | false |
+| 生成阶段回调写入失败 | generate | failed | false |
+| 数据库保存返回错误 | save | failed 或 timeout | false |
+| 缓存刷新失败，但保存成功 | completed | success | true |
+
+具体 outcome 依据最终返回错误分类。
+客户端断开可能表现为 Context 取消，也可能先表现为网络写入错误，
+不能只通过 canceled 分类判断是否正确退出。
+
+缓存刷新失败另有警告日志，不撤销已提交的消息。
+saved=true 表示 Service 已确认事务提交成功，
+不代表客户端一定收到了 done。
+
+saved=false 表示应用未确认保存成功；
+数据库提交过程中发生连接异常时，仍可能存在结果不确定的情况，
+应查询历史确认，不能自动重试提交。
+
+duration 是对应调用阶段的经过时间，不是首段输出延迟，
+也不是点击停止到资源释放的时间。
+
+结束日志在正常返回路径通过 defer 输出。
+若发生 panic，由恢复中间件记录；当前结束日志分类不用于判定 panic 结果。
+
+日志不记录用户问题、模型回答、密码、Token、Key 或供应商原始错误正文。
 
 本地 HTTP 测试验证请求取消能传递到 Eino 适配器及 HTTP 连接。
 这不代表远端模型平台一定停止推理或停止计费。
 
 ## 测试
+
+前端测试与构建：
+
+```powershell
+npm --prefix frontend run test
+npm --prefix frontend run build
+```
+
+当前测试覆盖包括：
+
+- 模型流读取、结束原因、取消、超时和 reader 关闭。
+- Service 完整回答保存、保存阶段取消边界及缓存刷新失败。
+- 模型与 Service 结束日志分类、字段白名单和脱敏。
+- SSE Handler 的 Write、Flush 失败和客户端断开。
+- 基于 net.Pipe 和真实 http.Server 的慢客户端写超时。
+- Vue 流式显示、停止、切换会话、过期回调、历史同步失败恢复和卸载取消。
+
+页面测试模拟 API 返回，不依赖真实模型或数据库。
+慢客户端测试使用缩短的测试写超时，不代表生产环境具有相同退出耗时。
+本地 HTTP、组件测试和数据库集成测试不能替代完整 Nginx 链路验收。
+
+真实链路调试方法见“SSE 流式聊天”章节。
 
 普通测试使用 Stub 和 miniredis，不要求真实 MySQL、Redis。
 未启用集成测试时执行：
@@ -438,7 +681,8 @@ $env:DB_NAME="bili_support"
 - 消息提交尚无请求幂等机制。
 - 角色变更影响后续检查，不会撤销已经通过检查的在途请求。
 - 未接 Casbin、Agent、RAG、Kafka、Kubernetes。
-- 当前配置数值属于功能约束，尚无性能压测结果，不能作为 QPS 或延迟指标。
+- 尚无正式性能压测结果。超时配置属于功能约束，不能作为 QPS、首段延迟、取消耗时或并发容量指标。
+- 当前日志提供模型阶段与 Service 阶段耗时，尚未形成首段延迟、取消传播耗时及业务成功率的指标统计。
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。
 - 优雅关闭最多等待 60 秒；超时后强制关闭连接。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。

@@ -10,3 +10,7 @@ import (
 type Generator interface {
 	Generate(ctx context.Context, message []*schema.Message, opts ...einomodel.Option) (*schema.Message, error)
 }
+
+type Streamer interface {
+	Stream(ctx context.Context, message []*schema.Message, opts ...einomodel.Option) (*schema.StreamReader[*schema.Message], error)
+}

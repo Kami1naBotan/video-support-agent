@@ -37,6 +37,7 @@ type MessageService struct {
 	contexts      MessageContextStore
 	logger        *zap.Logger
 	chat          ChatResponder
+	streamChat    ChatStreamResponder
 	guard         *ConversationGuard
 }
 
@@ -45,12 +46,15 @@ func NewMessageService(messages MessageStore, conversations ConversationStore, c
 		logger = zap.NewNop()
 	}
 
+	streamChat, _ := chat.(ChatStreamResponder)
+
 	return &MessageService{
 		messages:      messages,
 		conversations: conversations,
 		contexts:      contexts,
 		logger:        logger,
 		chat:          chat,
+		streamChat:    streamChat,
 		guard:         NewConversationGuard(),
 	}
 }

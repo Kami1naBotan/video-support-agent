@@ -1,10 +1,18 @@
 import axios from 'axios'
+import { ChatStreamRequestError } from './chat-stream-error'
 
 export function isCanceled(error: unknown): boolean {
-    return axios.isCancel(error)
+    return (
+        axios.isCancel(error) ||
+        (error instanceof DOMException && error.name === 'AbortError')
+    )
 }
 
 export function isUnauthorized(error: unknown): boolean {
+    if (error instanceof ChatStreamRequestError) {
+        return error.status === 401
+    }
+
     return axios.isAxiosError(error) && error.response?.status === 401
 }
 
@@ -12,6 +20,31 @@ export function errorMessage(
     error: unknown,
     fallback: string,
 ): string {
+    if (
+        error instanceof DOMException &&
+        error.name === 'TimeoutError'
+    ) {
+        return '等待回答超时，请刷新消息确认结果'
+    }
+
+    if (error instanceof ChatStreamRequestError) {
+        if (error.status === 401) {
+            return '登录凭证无效或已过期'
+        }
+
+        if (error.code === 'request_timeout') {
+            return '请求处理超时，请刷新消息确认结果'
+        }
+
+        if (error.code === 'internal_error') {
+            return '服务处理失败，请刷新消息确认结果'
+        }
+
+        return error.message.trim() !== ''
+            ? error.message
+            : fallback
+    }
+
     if (!axios.isAxiosError(error)) {
         return fallback
     }

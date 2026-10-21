@@ -78,6 +78,7 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 	conversations.GET("", conversationHandler.List)
 	conversations.GET("/:id", conversationHandler.GetByID)
 	conversations.POST("/:id/messages", messageHandler.Create)
+	conversations.POST("/:id/messages/stream", messageHandler.CreateStream)
 	conversations.GET("/:id/messages", messageHandler.List)
 
 	return r

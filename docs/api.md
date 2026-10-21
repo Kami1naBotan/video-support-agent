@@ -34,6 +34,7 @@ Authorization: Bearer <access_token>
 | GET | /api/v1/conversations/:id | 会话所有者 | 200 |
 | POST | /api/v1/conversations/:id/messages | 会话所有者 | 201 |
 | GET | /api/v1/conversations/:id/messages | 会话所有者 | 200 |
+| POST | /api/v1/conversations/:id/messages/stream | 会话所有者 | 200，业务完成以 done 为准 |
 | GET | /api/v1/conversations | 已登录，仅自己的会话 | 200 |
 
 所有受保护接口共享当前用户的限流额度：
@@ -51,7 +52,8 @@ Authorization: Bearer <access_token>
 该限制针对请求体字节数，与标题、消息内容的字符数限制分别校验。
 
 API 请求 Context 设置 40 秒截止时间。
-业务层返回的截止时间错误映射为 504；
+业务层返回的截止时间错误在响应开始前映射为 504；
+SSE 已开始时通过 error 事件报告；
 限流检查错误返回 503，缓存快照更新失败不改变已成功保存消息的响应。
 
 ## 注册
@@ -212,6 +214,115 @@ id、conversation_id、role、content、created_at。
 客户端应先查询历史，避免自动重试造成重复消息。
 会话占用仅保护当前实例，不支持多副本协调。
 
+## 流式发送消息
+
+POST /api/v1/conversations/:id/messages/stream
+
+请求头：
+
+```text
+Authorization: Bearer <access_token>
+Content-Type: application/json
+Accept: text/event-stream
+```
+
+请求体：
+
+```json
+{"content":"请介绍你可以提供的帮助"}
+```
+
+内容去除首尾空白后为 1～10000 个字符。
+必须通过会话所有权检查。
+普通与流式发送共享同一实例内的会话占用保护，
+同一会话不能同时处理两条消息。
+
+### 响应格式
+
+流开始时返回 HTTP 200，响应头为：
+
+```text
+Content-Type: text/event-stream; charset=utf-8
+Cache-Control: no-cache, no-transform
+X-Accel-Buffering: no
+```
+
+X-Accel-Buffering 可能被 Nginx 消费，不一定出现在浏览器中。
+
+响应采用 UTF-8 编码。每个事件由 event 和 JSON 格式的 data 组成，
+以空行结束。一次网络读取不一定对应一个完整事件。
+
+正常响应示例：
+
+```text
+event: start
+data: {"conversation_id":1}
+
+event: token
+data: {"content":"你好，"}
+
+event: token
+data: {"content":"请描述你的问题。"}
+
+event: citation
+data: {"items":[]}
+
+event: done
+data: {"user_message_id":10,"assistant_message_id":11}
+
+```
+
+| 事件 | 字段 | 语义 |
+|---|---|---|
+| start | conversation_id | 本轮流式处理开始，不代表模型已成功返回 |
+| token | content | 新增文本片段，保留空格和换行 |
+| citation | items | 引用数组；当前未接入 RAG，返回空数组 |
+| error | code、message | 处理失败，客户端停止等待正常完成 |
+| done | user_message_id、assistant_message_id | 事务提交成功后的两条消息 ID |
+
+正常顺序为 start → token → citation → done，
+token 可以出现多次。模型没有有效回答时会失败，不会正常完成。
+
+### 流开始前后的错误
+
+流开始前失败：返回对应 HTTP 错误状态和 JSON 错误体。
+例如身份失效返回 401，会话无权访问返回 404，会话占用返回 409。
+
+流开始后失败：HTTP 状态已经发送，使用 error 事件报告业务错误。
+例如：
+
+```text
+event: start
+data: {"conversation_id":1}
+
+event: error
+data: {"code":"model_timeout","message":"模型响应超时，请稍后重试"}
+
+```
+
+收到 error 后不会再收到正常的 done。
+客户端断开、写入或 Flush 失败时，服务端可能无法发送 error。
+
+当前模型输入预算检查发生在 start 之后。
+因此流式接口的 model_input_too_large 可以通过 HTTP 200 响应中的
+error 事件返回，不能照搬普通发送接口的 HTTP 400 判断。
+
+### 保存与取消
+
+模型完整生成且结束原因为 stop 后，事务保存用户消息和助手回答。
+生成过程中失败或取消，不保存本轮问答。
+输出长度截断等非正常结束返回 model_incomplete_reply，不保存部分回答。
+
+进入最终保存阶段后，使用独立且最多 3 秒的保存 Context。
+此时客户端断开，事务仍可能成功提交。
+缓存刷新失败不撤销已经提交的消息。
+
+done 在保存成功后发送；HTTP 200、收到文本、连接结束，
+均不能单独证明本轮已经保存成功。
+
+未收到 done 时，应通过 GET 消息历史确认结果。
+接口不支持自动重连、断点续传或请求幂等，不应自动重新提交问题。
+
 ## 查询消息历史
 
 GET /api/v1/conversations/:id/messages
@@ -223,7 +334,8 @@ Redis 缓存缺失不触发历史消息删除或自动缓存回填。
 
 ## 错误响应
 
-统一结构：
+普通接口及流式响应开始前的错误使用以下 JSON 结构。
+流式响应开始后的错误将同样的结构放入 error 事件的 data 中：
 
 ```json
 {
@@ -233,6 +345,8 @@ Redis 缓存缺失不触发历史消息删除或自动缓存回填。
 ```
 
 具体 message 可能因触发位置不同而变化，客户端应依据状态码和 code 判断。
+下表 HTTP 状态适用于尚未发送响应头的情况。
+SSE 已开始时，HTTP 状态保持 200，应读取 error 事件中的 code。
 
 | HTTP 状态 | code | 含义 |
 |---|---|---|
@@ -250,12 +364,15 @@ Redis 缓存缺失不触发历史消息删除或自动缓存回填。
 | 500 | internal_error | 内部异常 |
 | 502 | model_unavailable | 模型调用失败 |
 | 502 | model_empty_reply | 模型未返回有效文本 |
+| 502 | model_incomplete_reply | 模型回答未正常完整结束，本轮不保存 |
+| 503 | stream_unavailable | 当前模型客户端不支持流式调用 |
 | 503 | rate_limit_unavailable | 无法完成 Redis 限流检查 |
 | 504 | model_timeout | 模型调用超时 |
 | 504 | request_timeout | 业务处理返回请求截止时间错误 |
 
 429 响应包含整数秒的 Retry-After。
-503 不表示已经执行业务：限流失败会阻止后续 Handler。
+rate_limit_unavailable 表示限流检查失败，会阻止后续 Handler。
+其他 503 错误需要结合 code 判断原因。
 
 ## 存储与权限边界
 

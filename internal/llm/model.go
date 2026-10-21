@@ -14,6 +14,7 @@ import (
 const maxOutputTokens = 1024
 
 var _ Generator = (*openai.ChatModel)(nil)
+var _ Streamer = (*openai.ChatModel)(nil)
 
 func NewChatModel(ctx context.Context, cfg config.LLMConfig) (*openai.ChatModel, error) {
 	baseURL := strings.TrimSpace(cfg.BaseURL)
