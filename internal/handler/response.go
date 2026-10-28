@@ -40,10 +40,82 @@ func classifyResponseError(err error) (int, ErrorResponse) {
 		status = http.StatusBadRequest
 		code = "invalid_argument"
 		message = "invalid request"
+	case errors.Is(err, service.ErrRuleCategoryNotFound):
+		status = http.StatusNotFound
+		code = "rule_category_not_found"
+		message = "rule category not found"
+	case errors.Is(err, service.ErrKnowledgeDraftNotFound):
+		status = http.StatusNotFound
+		code = "knowledge_draft_not_found"
+		message = "knowledge draft not found"
+	case errors.Is(err, service.ErrKnowledgeVersionNotFound):
+		status = http.StatusNotFound
+		code = "knowledge_version_not_found"
+		message = "knowledge version not found"
+	case errors.Is(err, service.ErrKnowledgeArticleNotFound):
+		status = http.StatusNotFound
+		code = "knowledge_article_not_found"
+		message = "knowledge article not found"
+	case errors.Is(err, service.ErrKnowledgeVersionNotEditable):
+		status = http.StatusConflict
+		code = "knowledge_version_not_editable"
+		message = "knowledge version is not editable"
+	case errors.Is(err, service.ErrKnowledgeContentConflict):
+		status = http.StatusConflict
+		code = "knowledge_content_conflict"
+		message = "knowledge content revision conflict"
+	case errors.Is(err, service.ErrKnowledgeDocumentExists):
+		status = http.StatusConflict
+		code = "knowledge_document_exists"
+		message = "knowledge document already exists"
+	case errors.Is(err, service.ErrKnowledgeVersionExists):
+		status = http.StatusConflict
+		code = "knowledge_version_exists"
+		message = "knowledge version already exists"
 	case errors.Is(err, service.ErrUserNotFound):
 		status = http.StatusNotFound
 		code = "user_not_found"
 		message = "user not found"
+	case errors.Is(err, service.ErrKnowledgeDocumentNotFound):
+		status = http.StatusNotFound
+		code = "knowledge_document_not_found"
+		message = "knowledge document not found"
+	case errors.Is(err, service.ErrKnowledgeCurrentVersionNotFound):
+		status = http.StatusNotFound
+		code = "knowledge_current_version_not_found"
+		message = "no current effective knowledge version"
+	case errors.Is(err, service.ErrKnowledgePublicationConflict):
+		status = http.StatusConflict
+		code = "knowledge_publication_conflict"
+		message = "knowledge publication revision conflict"
+	case errors.Is(err, service.ErrKnowledgeVersionNotPublishable):
+		status = http.StatusConflict
+		code = "knowledge_version_not_publishable"
+		message = "knowledge version is not publishable"
+	case errors.Is(err, service.ErrKnowledgeVersionNotWithdrawable):
+		status = http.StatusConflict
+		code = "knowledge_version_not_withdrawable"
+		message = "knowledge version is not withdrawable"
+	case errors.Is(err, service.ErrKnowledgeVerificationRequired):
+		status = http.StatusConflict
+		code = "knowledge_verification_required"
+		message = "current knowledge content requires verification"
+	case errors.Is(err, service.ErrKnowledgeEffectiveTimeRequired):
+		status = http.StatusConflict
+		code = "knowledge_effective_time_required"
+		message = "knowledge effective time is required"
+	case errors.Is(err, service.ErrKnowledgeNotYetEffective):
+		status = http.StatusConflict
+		code = "knowledge_not_yet_effective"
+		message = "knowledge version is not yet effective"
+	case errors.Is(err, service.ErrKnowledgeExpired):
+		status = http.StatusConflict
+		code = "knowledge_expired"
+		message = "knowledge version has expired"
+	case errors.Is(err, service.ErrKnowledgeCurrentVersionExists):
+		status = http.StatusConflict
+		code = "knowledge_current_version_exists"
+		message = "knowledge document already has a current version"
 	case errors.Is(err, service.ErrConversationNotFound):
 		status = http.StatusNotFound
 		code = "conversation_not_found"

@@ -8,8 +8,10 @@ Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 流式模
 模型调用前读取最近历史，成功后通过 MySQL 事务保存用户消息和模型回答，
 再读取已提交的最近消息，整体更新 Redis 上下文快照。
 
-当前已实现模型问答和 SSE 流式输出，尚未接入规则知识库、RAG、
-工具调用、Kafka 和 Kubernetes。
+当前已有模型问答、SSE 流式输出及独立的规则知识库后端。
+知识库支持草稿、来源核验、发布、版本切换、历史追溯和下线；
+尚未接入聊天回答、RAG、工具调用、Kafka 或 Kubernetes。
+知识库最终回归和模拟资料 HTTP 演示的验收状态单独记录。
 
 项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
 
@@ -46,7 +48,7 @@ Eino、Eino OpenAI 兼容模型适配器。
 - 流式回答完整生成后，通过 MySQL 事务保存本轮问答。
 - Nginx 关闭 API 响应缓冲与缓存，支持 SSE 转发。
 
-角色验证接口只返回当前用户信息，不包含客服坐席或管理业务。
+角色验证接口仅返回当前用户信息；知识库管理接口另设在管理员路由下。
 客服和管理员不会自动获得访问他人会话的权限。
 
 ## 本地启动
@@ -440,7 +442,7 @@ flowchart TD
 
 | 组件 | 用途 |
 |---|---|
-| MySQL | 用户、角色、会话、完整消息历史 |
+| MySQL | 用户、角色、会话、完整消息历史，以及知识库文档、版本、原始条款、派生片段、分类、核验与操作记录 |
 | Redis | 短期上下文、限流计数 |
 
 上下文键：`conversation:context:{conversationID}`。
@@ -625,30 +627,60 @@ npm --prefix frontend run build
 
 真实链路调试方法见“SSE 流式聊天”章节。
 
-普通测试使用 Stub 和 miniredis，不要求真实 MySQL、Redis。
-未启用集成测试时执行：
+部分单元测试使用 Stub 和 miniredis，不需要真实基础设施。
+但当前 router 包包含要求显式隔离配置的知识库 MySQL 测试，
+缺少配置时部分测试会失败，不能把 go test ./... 当作无数据库的默认入口。
+
+知识库 Service 与 Handler 的局部检查：
 
 ```powershell
-go test ./... -count=1
-go vet ./...
+go test ./internal/service ./internal/handler -run '^TestKnowledge' -count=1 -v
 ```
 
-MySQL 集成测试需要已准备好的独立数据库 `bili_support_test`
-及相应权限。在专用终端设置连接参数后执行：
+该命令不覆盖真实路由、MySQL 事务、锁或并发。
+
+真实 MySQL 验收要求预先准备独立 bili_support_test，
+确认连接账号、目标实例、InnoDB 表结构及隔离条件，
+并停止其他测试与演示写入。
+连接密码只通过本机环境配置。
+
+在专用终端明确设置：
 
 ```powershell
-$env:RUN_MYSQL_TESTS="1"
-$env:DB_NAME="bili_support_test"
-
-go test ./internal/repository -run 'Test.*MySQL$' -v -count=1
-
-Remove-Item Env:RUN_MYSQL_TESTS
-$env:DB_NAME="bili_support"
+$env:RUN_MYSQL_TESTS = "1"
+$env:DB_NAME = "bili_support_test"
 ```
 
-集成测试中的测试记录通过事务回滚清理；
-表结构迁移和自增序列变化不属于记录回滚保证。
+先执行只读身份预检：
+
+```powershell
+go test ./internal/router -run '^TestKnowledgeMySQLPreflight$' -count=1 -v
+```
+
+核对输出确实是预期测试实例后，
+将该实例 UUID 配置到 TEST_MYSQL_SERVER_UUID。
+确认其他写入者已停止后设置 TEST_ISOLATED=1；
+环境变量声明本身不能证明隔离已经完成。
+
+完成上述条件后，知识库回归入口为：
+
+```powershell
+go test ./internal/service ./internal/handler ./internal/router -run '^TestKnowledge' -p 1 -count=1 -timeout=300s -v
+```
+
+发布、切换和下线夹具进一步核对实例 UUID，
+并使用独立连接验证真实事务和竞争。
+测试库元数据检查不能替代账号权限与外部隔离确认。
+
+知识库测试含实际提交和定向夹具清理，
+不能统称为“全部通过外层事务回滚清理”。
+DDL、自增序列以及故障清理失败不属于记录回滚保证。
 不得在业务数据库运行集成测试。
+
+最终验收还需覆盖既有认证和聊天后端回归，
+不能只运行 TestKnowledge。
+完整执行范围、退出码、失败、跳过项和脱敏日志在 D07-S06-R04 记录。
+未运行、环境阻塞或关键用例跳过均不能记作验收通过。
 
 ## 当前已验证的场景
 
@@ -686,3 +718,212 @@ $env:DB_NAME="bili_support"
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。
 - 优雅关闭最多等待 60 秒；超时后强制关闭连接。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。
+
+## 规则知识库后端
+
+本项目模拟智能客服的规则管理流程，不是 Bilibili 官方系统，
+也不保证与官方产品的接口或管理方式一致。
+知识库目前独立提供 HTTP 接口，尚未用于聊天回答。
+
+业务调用路径为：
+Gin Router → Handler → Service → GORM Repository → MySQL。
+
+Handler 处理身份、参数和响应映射；Service 处理业务输入与能力边界；
+Repository 完成一致性读取、事务、锁和持久化。
+MySQL 是知识库已录入内容及管理状态的权威数据源。
+网页副本用于来源追溯，派生片段不替代原始条款。
+
+### 五类核心模型及扩展记录
+
+| 模型 | 职责与关系 |
+|---|---|
+| KnowledgeDocument | 保存稳定 document_key、当前版本指针和 publication_revision；一个文档有多个版本 |
+| RuleVersion | 属于文档和一个分类；保存版本标识、标题、正文、来源、有效期、内容修订与管理状态 |
+| RuleArticle | 属于版本；保存章节路径、真实条款编号、顺序和完整条文 |
+| KnowledgeChunk | 属于条款；当前每条条款派生一个片段，chunk_index=0，不生成向量 |
+| RuleCategory | 预置分类；当前包含账号管理、投稿审核、版权申诉、社区规范、弹幕规范 |
+
+章节路径是条款字段，不单设章节表。没有官方条款编号时保留空编号，
+不能把内部顺序号伪装成官方编号。分类 ID 取实际数据库值，不能猜测。
+
+两类扩展记录：
+
+- RuleVerification：保存核验人、核验时间、核验说明、依据 URL、
+  被核验的内容修订号及录入内容快照。
+- RuleOperation：保存发布或下线的操作者、操作时间、
+  操作前后当前指针及发布修订号。
+
+RuleVerification.ContentSnapshot 是系统生成的录入内容与条款快照，
+不等于下载的官方网页副本；网页 HTML、PDF 等证据另行保留。
+verified_at 是系统核验时间，不是资料取得时间。
+
+### 时间与状态
+
+有效期为左闭右开区间：
+
+effective_at <= 查询时刻 < expires_at
+
+expires_at 为空时不设置固定截止时间，但不表示规则永久有效。
+effective_at 在草稿中允许为空，发布时必须非空、已到生效时刻且未过期。
+published_at 是本系统发布时间，不替代来源规定的生效时间。
+
+当前规则必须同时满足：
+
+- 被文档 current_version_id 选中；
+- 状态为 published，且未下线；
+- 已生效且未过期。
+
+当前查询只沿文档指针读取，不扫描旧版寻找替代结果。
+下线清空指针；自然过期在查询时判断，不依赖定时任务，也不自动清空指针。
+因此管理接口显示“有当前选择”不一定表示当前有有效规则。
+
+没有当前有效规则时返回：
+HTTP 404，code=knowledge_current_version_not_found。
+
+这是合法业务结果，不是数据库异常。
+数据库异常仍按内部错误处理，不能转换成“无有效规则”。
+
+### 内容修订、发布修订与事务
+
+content_revision 属于版本：
+编辑草稿后递增，核验绑定实际内容修订。
+编辑之后旧核验不再匹配，发布前必须重新核验。
+
+publication_revision 属于文档：
+首次发布、切换和下线成功后递增；
+创建草稿、编辑和核验不推进它。
+
+发布与下线携带 expected_publication_revision，
+事务内按“文档 → 版本”顺序加锁，再检查归属、修订和操作条件。
+当前选择、版本管理状态、发布修订号和操作记录在同一事务中更新。
+版本切换复用 publish 接口，没有单独的 switch 接口。
+
+过时请求返回 HTTP 409、knowledge_publication_conflict。
+收到冲突后，应读取当前状态并判断是否继续，不能自动刷新修订号重试。
+此修订号约束不等于请求幂等机制。
+
+提交前失败回滚，不能留下部分更新。
+提交阶段连接异常可能使客户端无法确定结果；
+应查询状态确认，不能认定一定回滚或盲目重试。
+
+当前及历史读取使用一致性快照。
+响应描述该次读取观察到的状态，不保证响应到达客户端时状态仍未变化。
+
+### 发布后冻结与历史引用
+
+已发布内容不能通过草稿编辑接口覆盖，包括标题、正文、来源、
+有效期、条款和分类归属。修改应创建新草稿版本。
+
+新增版本区分：
+
+- official：官方修订，要求修订依据 URL。
+- editorial：知识库录入修订，不代表官方发布新版。
+
+首次创建版本当前使用 unknown 修订类型，
+不能仅凭项目版本字符串将其称为官方版本号。
+
+历史引用使用 version_id 和 article_id，
+不能只依赖当前指针、条款序号或新版条款 ID。
+
+历史响应显示 is_current、is_superseded、is_expired、
+is_withdrawn 和 is_current_effective。
+被替代、过期、下线是不同事实，不应相互替代解释。
+
+旧版被替代后保留；新版下线后也保留。
+当前接口不提供旧版一键恢复。
+已发布旧版不能直接重新发布，可参考其内容建立新草稿并重新核验。
+
+### HTTP 接口与权限
+
+下表路径均以 /api/v1 为前缀。
+
+| 方法 | 路径 | 权限 / 用途 |
+|---|---|---|
+| POST | /auth/login | 登录，返回 Bearer Token |
+| GET | /me | 登录用户查询自身身份 |
+| POST | /admin/knowledge/documents | 管理员创建文档及首个草稿 |
+| POST | /admin/knowledge/documents/:document_id/versions | 管理员创建新修订 |
+| GET | /admin/knowledge/documents/:document_id | 管理员读取指针及发布修订号 |
+| GET | /admin/knowledge/versions/:version_id | 管理员读取草稿及核验摘要 |
+| PUT | /admin/knowledge/versions/:version_id | 管理员完整替换草稿内容 |
+| POST | /admin/knowledge/versions/:version_id/verifications | 管理员核验指定内容修订 |
+| POST | /admin/knowledge/documents/:document_id/publish | 管理员发布或切换当前版本 |
+| POST | /admin/knowledge/documents/:document_id/withdraw | 管理员下线当前选择的版本 |
+| GET | /knowledge/documents/:document_id/current | user/support/admin 查询当前有效规则 |
+| GET | /knowledge/versions/:version_id | user/support/admin 查询已发布历史 |
+| GET | /knowledge/versions/:version_id/articles/:article_id | user/support/admin 查询历史条款 |
+
+未登录返回 401，无管理权限返回 403。
+普通查询不开放草稿，不返回核验人等内部管理字段。
+角色依据数据库当前身份检查，不仅依赖令牌签发时的状态。
+
+当前没有分类管理后台、分类查询 HTTP 接口或操作记录列表 HTTP 接口。
+核验摘要由管理员草稿详情返回；操作记录持久化及一致性由集成测试核对。
+
+### 启动、迁移及请求限制
+
+沿用前文的 MySQL、Redis、JWT 和 LLM 环境配置。
+完整 API 启动仍初始化现有依赖；
+知识库请求本身不调用模型，但当前没有独立的知识库启动模式。
+
+go.mod 当前声明 Go 1.27.1。
+数据库结构准备入口为 cmd/migrate，分类初始化入口为 cmd/seed，
+API 入口为 cmd/api。
+
+确认目标数据库及已有数据处理方案后，按需执行：
+
+```powershell
+go run ./cmd/migrate
+go run ./cmd/seed
+go run ./cmd/api
+```
+
+以上是操作说明，不代表需要每次演示重新迁移。
+cmd/migrate 使用 AutoMigrate，不替代旧结构拆分、数据回填和迁移核对，
+也不自动证明历史数据迁移正确。不能为重新演示删除用户或聊天数据。
+cmd/seed 初始化分类，不创建管理员账号，也不录入规则正文。
+
+/api/v1 请求体上限为 64 KiB，即 65536 字节；
+包含 JSON 字段、转义及 content/articles 的重复内容，
+不是只计算原始正文长度。超限返回 413、request_too_large。
+请求 Context 期限为 40 秒，不能保证所有阻塞操作被强制中断。
+
+健康检查仅证明 HTTP 服务可响应，不能证明测试库身份或完整依赖正常。
+
+### 来源、模拟演示与数据隔离
+
+来源采用人工核对，不自动抓取。
+当前官方来源辅助校验只允许 www.bilibili.com 主机。
+通过 URL 校验不能证明内容真实、完整或仍然适用。
+
+完整模拟流程见 [knowledge-demo.http](docs/http/knowledge-demo.http)。
+它使用 OFF-001 本地 HTML 中的完整第 2.8 条作为节选，
+不冒充完整协议，适用对象为中国大陆以外用户。
+
+日期 2025-06-16 来自页面；
+00:00:00 和 UTC+8 是本项目明确标注的演示转换约定，
+不声称官方声明了该精确时刻。
+entry-001、entry-002 是录入编号；第二版仅完善项目标题，
+属于 editorial，不代表官方更新。
+
+模拟演示约定不构成生产式官方资料验收结论。
+快照取得时间若未确认，继续标为待确认，不能用文件修改时间或核验时间冒充。
+
+虚构规则仅用于明确标记的测试文件和独立测试库 bili_support_test。
+HTTP 模拟演示使用已确认数据库身份的专用环境；
+自动化测试与人工演示不能同时写入同一测试库。
+真实业务库不能用于故障注入、测试清理或并发验收。
+
+凭据使用本机环境变量；令牌只保留在本地 HTTP Client。
+不提交密码、Token、JWT_SECRET、数据库密码或模型 Key。
+请求材料已保存不表示请求已执行；运行证据须脱敏后另行记录。
+
+### 知识库已知限制与验收边界
+
+- 无管理前端、自动抓取、预约发布、旧版一键恢复或隐式回退。
+- 不接入聊天、ES、Milvus、Kafka、RAG 或媒体处理。
+- 全文较大时可能超过现有请求体上限；不自动放宽限制。
+- 没有正式吞吐量、延迟或容量结论。
+- 人工来源核验不能保证页面此后不变，文件哈希不能单独证明官方真实性。
+- HTTP 成功结果不能替代真实事务、并发锁、故障回滚和操作记录一致性测试。
+- 阶段既有测试证据与最终全日回归分别记录；最终验收未完成前不宣称第7天全部通过。

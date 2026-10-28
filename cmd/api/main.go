@@ -143,7 +143,7 @@ func run() error {
 		Handler:           r,
 		ReadHeaderTimeout: 3 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
+		WriteTimeout:      50 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    16 * 1024,
 	}

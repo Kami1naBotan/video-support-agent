@@ -53,8 +53,12 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 
 	messageHandler := handler.NewMessageHandler(messageService)
 
+	knowledgeRepository := repository.NewKnowledgeRepository(db)
+	knowledgeService := service.NewKnowledgeService(knowledgeRepository)
+	knowledgeHandler := handler.NewKnowledgeHandler(knowledgeService)
+
 	api := r.Group("/api/v1")
-	api.Use(middleware.BodyLimit(64*1024), middleware.RequestDeadline(5*time.Second))
+	api.Use(middleware.BodyLimit(64*1024), middleware.RequestDeadline(40*time.Second))
 
 	authRoutes := api.Group("/auth")
 	authRoutes.Use(middleware.AuthRateLimit(authLimiter, appLogger))
@@ -72,6 +76,23 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 	admin := protected.Group("/admin")
 	admin.Use(middleware.RequireRoles(currentUserService, model.RoleAdmin))
 	admin.GET("/me", currentUserHandler.Me)
+
+	knowledge := admin.Group("/knowledge")
+
+	knowledge.POST("/documents", knowledgeHandler.Create)
+	knowledge.POST("/documents/:document_id/versions", knowledgeHandler.CreateRevision)
+	knowledge.GET("/documents/:document_id", knowledgeHandler.GetDocumentState)
+	knowledge.POST("/documents/:document_id/publish", knowledgeHandler.Publish)
+	knowledge.POST("/documents/:document_id/withdraw", knowledgeHandler.Withdraw)
+	knowledge.GET("/versions/:version_id", knowledgeHandler.GetByID)
+	knowledge.PUT("/versions/:version_id", knowledgeHandler.Edit)
+	knowledge.POST("/versions/:version_id/verifications", knowledgeHandler.Verify)
+
+	currentKnowledge := protected.Group("/knowledge")
+	currentKnowledge.Use(middleware.RequireRoles(currentUserService, model.RoleUser, model.RoleSupport, model.RoleAdmin))
+	currentKnowledge.GET("/documents/:document_id/current", knowledgeHandler.GetCurrent)
+	currentKnowledge.GET("/versions/:version_id", knowledgeHandler.GetHistory)
+	currentKnowledge.GET("/versions/:version_id/articles/:article_id", knowledgeHandler.GetHistoryArticle)
 
 	conversations := protected.Group("/conversations")
 	conversations.POST("", conversationHandler.Create)
