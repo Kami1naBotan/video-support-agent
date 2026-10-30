@@ -11,7 +11,10 @@ import (
 	"time"
 	"video-support-agent/internal/auth"
 	"video-support-agent/internal/cache"
+	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/llm"
+	"video-support-agent/internal/repository"
+	"video-support-agent/internal/retrieval"
 
 	"video-support-agent/internal/config"
 	"video-support-agent/internal/database"
@@ -35,6 +38,10 @@ func main() {
 func run() error {
 	cfg := config.Load()
 
+	if err := config.ValidateElasticsearchConfig(cfg.Elasticsearch); err != nil {
+		return err
+	}
+
 	trustedProxies, proxyErr := config.ValidateTrustedProxies(cfg.TrustedProxies)
 	if proxyErr != nil {
 		return proxyErr
@@ -46,7 +53,6 @@ func run() error {
 	} else {
 		gin.SetMode(gin.DebugMode)
 	}
-
 	appLogger, err := logger.New(cfg.LogLevel)
 	if err != nil {
 		return errors.New("initialize logger failed")
@@ -75,6 +81,24 @@ func run() error {
 	}
 	defer func() { _ = sqlDB.Close() }()
 	appLogger.Info("database connected")
+
+	searchClient, err := elasticsearch.NewClient(cfg.Elasticsearch)
+	if err != nil {
+		return errors.New("initialize Elasticsearch client failed")
+	}
+	defer searchClient.Close()
+
+	searchRepository := repository.NewKnowledgeRepository(db)
+
+	searchService, err := retrieval.NewService(
+		searchClient,
+		searchRepository,
+	)
+	if err != nil {
+		return errors.New("initialize retrieval service failed")
+	}
+
+	appLogger.Info("retrieval dependencies initialized")
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:                  cfg.Redis.Addr,
@@ -131,7 +155,7 @@ func run() error {
 
 	appLogger.Info("LLM client initialized")
 
-	r := router.New(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient)
+	r := router.NewWithRetriever(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient, searchService)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
 

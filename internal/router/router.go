@@ -8,6 +8,7 @@ import (
 	"video-support-agent/internal/middleware"
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/repository"
+	"video-support-agent/internal/retrieval"
 	"video-support-agent/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,10 @@ import (
 )
 
 func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder) *gin.Engine {
+	return NewWithRetriever(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, nil)
+}
+
+func NewWithRetriever(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever) *gin.Engine {
 	r := gin.New()
 
 	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
@@ -56,6 +61,7 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 	knowledgeRepository := repository.NewKnowledgeRepository(db)
 	knowledgeService := service.NewKnowledgeService(knowledgeRepository)
 	knowledgeHandler := handler.NewKnowledgeHandler(knowledgeService)
+	knowledgeSearchHandler := handler.NewKnowledgeSearchHandler(retriever)
 
 	api := r.Group("/api/v1")
 	api.Use(middleware.BodyLimit(64*1024), middleware.RequestDeadline(40*time.Second))
@@ -90,6 +96,7 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 
 	currentKnowledge := protected.Group("/knowledge")
 	currentKnowledge.Use(middleware.RequireRoles(currentUserService, model.RoleUser, model.RoleSupport, model.RoleAdmin))
+	currentKnowledge.GET("/search", knowledgeSearchHandler.Search)
 	currentKnowledge.GET("/documents/:document_id/current", knowledgeHandler.GetCurrent)
 	currentKnowledge.GET("/versions/:version_id", knowledgeHandler.GetHistory)
 	currentKnowledge.GET("/versions/:version_id/articles/:article_id", knowledgeHandler.GetHistoryArticle)

@@ -8,10 +8,14 @@ Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 流式模
 模型调用前读取最近历史，成功后通过 MySQL 事务保存用户消息和模型回答，
 再读取已提交的最近消息，整体更新 Redis 上下文快照。
 
-当前已有模型问答、SSE 流式输出及独立的规则知识库后端。
+当前已有模型问答、SSE 流式输出、独立规则知识库后端及规则搜索 API。
 知识库支持草稿、来源核验、发布、版本切换、历史追溯和下线；
-尚未接入聊天回答、RAG、工具调用、Kafka 或 Kubernetes。
-知识库最终回归和模拟资料 HTTP 演示的验收状态单独记录。
+搜索采用 Elasticsearch 片段级索引，并由 MySQL 批量复核候选的当前状态。
+支持正文关键词、标题加权、章节检索、条款编号精确查询、分类过滤、
+当前有效版本过滤和高亮。
+
+规则搜索尚未接入聊天回答，也没有独立搜索前端。
+尚未实现 RAG、工具调用、Milvus、混合检索、Kafka 或 Kubernetes。
 
 项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
 
@@ -20,6 +24,7 @@ Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 流式模
 Go、Gin、GORM、MySQL、Redis、bcrypt、JWT、Zap、Docker Compose。
 Vue 3、TypeScript、Vite、Vue Router、Pinia、Axios、Element Plus、Nginx。
 Eino、Eino OpenAI 兼容模型适配器。
+Elasticsearch 8.19.0，通过 HTTP API 使用，采用独立 Docker Compose 项目部署。
 
 ## 已实现功能
 
@@ -47,6 +52,11 @@ Eino、Eino OpenAI 兼容模型适配器。
 - Vue 使用 Fetch 读取响应流，支持生成状态、主动停止和会话切换取消。
 - 流式回答完整生成后，通过 MySQL 事务保存本轮问答。
 - Nginx 关闭 API 响应缓冲与缓存，支持 SSE 转发。
+- MySQL 当前有效规则片段的一致性快照导出。
+- Elasticsearch 全量重建、逐项 Bulk 结果检查、发布前验证和单目标 Alias 切换。
+- 统一 Retriever 接口及受认证、限流、数据库角色检查保护的规则搜索 API。
+- ES 候选经 MySQL 批量复核后返回；无命中与依赖故障分别处理。
+- 搜索结果携带规则来源、版本、条款与片段身份，以及可选高亮。
 
 角色验证接口仅返回当前用户信息；知识库管理接口另设在管理员路由下。
 客服和管理员不会自动获得访问他人会话的权限。
@@ -394,7 +404,7 @@ try {
 检查 Nginx 生效配置、是否已 reload，以及响应缓冲和压缩配置。
 
 ## 当前架构
-
+以下为现有聊天与 SSE 链路：
 ```mermaid
 flowchart TD
     Browser["Vue 3 聊天页面"]
@@ -436,7 +446,33 @@ flowchart TD
     Done --> Handler
 ```
 
-健康检查直接返回 HTTP 服务状态，不经过上述 API 认证与限流链路。
+规则搜索使用独立链路，目前不向聊天模型提供检索结果：
+
+```mermaid
+flowchart TD
+    Caller["搜索 API 调用方"] --> Gate["Gin：JWT、限流、数据库角色检查"]
+    Gate --> Handler["搜索 Handler：严格参数解析与响应映射"]
+    Handler --> Retriever["Retriever：统一查询时刻与结果编排"]
+    Retriever --> Search["ES 适配器：解析单目标 Alias，固定物理索引"]
+    Search --> ES[("Elasticsearch：候选检索、排序、高亮")]
+    ES --> Candidates["有界候选"]
+    Candidates --> Verify["MySQL Repository：只读 RR 快照批量复核"]
+    Verify --> DB[("MySQL：规则内容、归属、当前版本与状态")]
+    Verify --> Result["保留 ES 顺序，过滤后取 Limit"]
+    Result --> Handler
+
+    CLI["人工串行执行重建 CLI"] --> Export["MySQL 一致性快照导出"]
+    DB --> Export
+    Export --> Build["新物理索引：Bulk、refresh、数量和样例验证"]
+    Build --> Switch["验证通过后原子切换 ES Alias"]
+    Switch --> ES
+```
+
+图中的 MySQL 读取分为两类：请求期复核候选，维护期导出重建快照。
+它们不是同一个事务，也不与 ES 组成分布式事务。
+
+健康检查只表示 HTTP 服务能够响应，不证明 ES、MySQL、
+Redis 或模型服务均可用。
 
 ## 数据职责
 
@@ -444,6 +480,14 @@ flowchart TD
 |---|---|
 | MySQL | 用户、角色、会话、完整消息历史，以及知识库文档、版本、原始条款、派生片段、分类、核验与操作记录 |
 | Redis | 短期上下文、限流计数 |
+| Elasticsearch | 从 MySQL 派生的规则片段索引，用于关键词召回、相关性排序和高亮；可以重建，不作为唯一事实来源 |
+
+MySQL 保存已录入的规则内容、版本归属、当前版本指针、发布修订号及管理状态。
+Elasticsearch 保存检索所需的展开副本，不能替代 MySQL 的版本管理和事务约束。
+
+ES 索引丢失或 Mapping 需要调整时，可以从 MySQL 的当前有效规则重新构建。
+重建不会恢复 MySQL 中不存在的内容，也不代表已经验证资料的官方真实性。
+Redis 继续承担上下文缓存和限流，不保存规则事实。
 
 上下文键：`conversation:context:{conversationID}`。
 限流键：`ratelimit:user:{userID}`。
@@ -719,14 +763,357 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - 优雅关闭最多等待 60 秒；超时后强制关闭连接。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。
 
+## Elasticsearch 规则检索
+
+### 索引粒度、Mapping 与 Alias
+
+一个 ES 文档对应一个 KnowledgeChunk，ES `_id` 使用片段 ID 的规范十进制字符串。
+索引展开保存所属文档、版本、条款、分类、标题、章节、正文、来源及有效期。
+当前知识库写入逻辑每条条款生成一个片段，chunk_index=0；
+片段级索引设计不表示已经实现长条款的多片段切分。
+
+Mapping 定义字段如何保存和检索：
+- title、section_path、content 使用 text 类型和内置 cjk 分析器。
+- ID、发布修订号、条款编号采用 keyword，使用精确匹配。
+- 顺序字段采用 long，日期使用约定的 UTC 毫秒格式。
+- version、source_url 保留原值，但不用于检索。
+- dynamic=strict 拒绝未知字段；必填与关联完整性仍由应用校验。
+
+物理 Index 保存一版完整检索数据；名称中的 v1 表示 Mapping 版本，
+不表示官方规则版本。
+
+Alias 提供稳定的查询名称。应用要求其只指向一个物理索引，
+解析后固定该目标执行本次搜索，避免一次请求混用两个索引。
+Alias 设置 is_write_index=false，用于避免经该别名误写，
+但这不是访问控制，不能阻止直接写物理索引。
+
+### 倒排索引与中文分析
+
+倒排索引记录“词项出现在哪些文档中”，并保存评分需要的信息。
+查询文本经过分析后，ES 根据词项找到候选，不需要像普通字符串扫描一样
+逐条检查全部正文。
+
+本项目使用内置 cjk 分析器，主要通过相邻 CJK 字符组合形成词项，
+无需安装外部分词插件。它不是中文词典理解或语义检索：
+专有名词、单字和中英文混排的效果需要用实际资料验证。
+
+条款编号使用 keyword 精确匹配，不经过正文分词，
+不将汉字数字、阿拉伯数字或内部顺序号自动互换。
+
+### BM25 与标题加权
+
+BM25 综合考虑：
+- 词频：出现次数增加通常有帮助，但收益逐渐饱和。
+- 逆文档频率：在索引中越少见的词，通常越有区分力。
+- 字段长度：对文本长短进行归一化，避免长文本仅因字多就占优势。
+
+自由文本使用 multi_match，字段权重为：
+title^3、section_path^2、content，采用 best_fields 和 operator=or。
+标题权重会影响相关性，但不保证所有标题命中都排在正文命中之前。
+
+显式章节条件采用 match 过滤，条款编号、分类和文档 ID 使用 term 过滤；
+各类条件组合为 AND。自由文本内部采用 OR，不代表不同筛选条件之间也是 OR。
+
+结果按相关性分数降序排列，同分时按 chunk_id 字符串升序排列。
+该顺序不是条款自然顺序，分数也不是概率、可信度或跨查询可比较的质量指标。
+
+### 当前有效性与召回边界
+
+每次搜索生成一个 UTC 毫秒查询时刻，ES 过滤与 MySQL 复核共用该时刻。
+当前有效要求版本由文档当前指针选中、真实归属于该文档、已经发布、
+未下线、生效时间不晚于查询时刻，并且失效时间为空或晚于查询时刻。
+
+ES 先返回 Limit×5 个候选，最多 250 个。
+MySQL 在一个只读 REPEATABLE READ 事务中批量复核真实归属、当前指针、
+发布修订号、状态和时间。服务保留通过复核候选的 ES 顺序，再取 Limit 条。
+
+陈旧候选被剔除后，结果可以少于 Limit，甚至为空。
+当前不补搜、不分页，不提供全部有效命中的总数；响应 count 仅表示本次返回条数。
+
+MySQL 复核依赖发布后内容冻结的约定，检查身份、归属、修订号和当前状态，
+不逐字比较 ES 正文与 MySQL 正文，因此不是索引内容完整性审计。
+
+### 重建与一致性限制
+
+重建从 MySQL 一致性快照导出当前有效片段，写入新的物理索引，
+逐项检查 Bulk 结果，执行 refresh、数量和样例验证后，再原子切换 ES Alias。
+旧索引保留，不自动删除；重建由维护者串行执行，没有跨进程分布式锁。
+
+Alias 原子切换只发生在 ES 内部，不构成 ES 与 MySQL 的事务。
+发布、版本切换或下线后需要维护者重建索引，当前没有自动同步或 CDC。
+
+如果重建期间 MySQL 切换了版本，搜索复核可以剔除旧版候选，
+但无法召回尚未进入 ES 的新版内容。共用查询时刻也不代表两个存储共享快照；
+MySQL 的有效性保证限于复核读取快照，响应后仍可能发生管理变更。
+
+### 高亮、安全和运行边界
+
+高亮单独放在 highlights 中，不覆盖原始正文。
+ES 使用 HTML 编码和固定 em 标签；后续前端接入时仍需只允许受控标记，
+不能把任意返回字符串作为可信 HTML。
+
+正文最多返回 3 段、目标长度 160 字符；章节最多 2 段、目标长度 120 字符；
+标题可以完整返回。目标片段长度不是严格字节上限，响应仍受整体大小预算约束。
+
+无命中是成功的空结果；ES 故障、索引未就绪、非法后端响应、
+超时和 MySQL 复核失败返回明确错误，不将故障伪装成空结果。
+
+ES 使用独立 Compose 项目，本地模式关闭认证与 TLS，仅绑定回环地址。
+这不是可直接对外部署的安全配置。
+当前没有正式搜索吞吐量、延迟、召回率或排序质量测量结论。
+
+### 本地部署与进程配置
+
+ES 使用独立 Compose 项目 go-ai-agent-es，不随原 MySQL/Redis 项目自动启动。
+以下命令在项目根目录执行；已运行的环境无需重复初始化索引。
+
+```powershell
+docker compose -f compose.elasticsearch.yaml up -d elasticsearch
+docker compose -f compose.elasticsearch.yaml ps
+
+Invoke-RestMethod 'http://127.0.0.1:9200/_cluster/health?wait_for_status=green&timeout=10s'
+Invoke-RestMethod 'http://127.0.0.1:9200/_alias/rule_chunks_current'
+```
+
+检查健康响应的 timed_out 为 false、status 为 green。
+健康正常不代表 Alias 已建立，也不代表索引已有规则。
+
+ES 使用命名卷保存数据。日常停止使用 stop，不通过删除数据卷排查普通故障。
+单节点、一个主分片、零副本的配置用于本地学习，不提供节点故障冗余。
+
+API 和重建 CLI 分别读取各自进程的环境变量：
+
+| 变量 | 默认值 | 用途 |
+|---|---|---|
+| ES_URL | http://127.0.0.1:9200 | ES 根地址，不包含凭据、查询参数或路径前缀 |
+| ES_INDEX_ALIAS | rule_chunks_current | 已建立的单目标查询别名 |
+| ES_TIMEOUT | 5s | 每次 ES HTTP 请求超时，必须为正时长 |
+
+Go 程序不会自动加载 .env，GoLand Run Configuration 与终端环境不自动互通。
+本地 API 运行在宿主机时可以使用上述回环地址；容器内的回环地址指向容器自身，
+不能直接照搬宿主机配置。
+
+API 仍需原有 MySQL、Redis、JWT 和模型配置。
+ES 客户端初始化只校验配置，不执行健康探测、建索引或重建。
+HTTP /health 正常不能代替搜索依赖检查。
+
+全新环境可以先初始化空物理索引和 Alias，也可以通过完整重建首次发布。
+当查询 Alias 不存在时，重建 CLI 会在新索引写入并验证成功后创建 Alias；
+空快照仍默认拒绝，不能借首次发布绕过空结果保护。
+
+已有 Alias 必须满足单目标、显式禁用别名写入等约束。
+初始化请求材料包含已使用过的物理名称，不能原样重跑或覆盖已有资源。
+
+### 全量重建操作
+
+重建 CLI 只使用 MySQL 与 ES，不启动 HTTP、Redis、JWT 或模型客户端，
+也不负责数据库迁移或规则录入。
+
+执行前确认：
+
+1. DB_HOST、DB_PORT、DB_USER、DB_PASSWORD、DB_NAME 指向预期源库。
+2. 在独立确认的 MySQL 连接中读取源库名称和实例 UUID。
+3. API 与 CLI 使用同一规则源库、ES 集群及 Alias。
+4. 源库已有完成核验、发布且当前有效的规则；不存在其他并发重建或 Alias 维护。
+
+可在已选定数据库的 SQL 控制台使用只读语句：
+
+```sql
+SELECT DATABASE() AS source_database, @@server_uuid AS source_server_uuid;
+```
+
+预期身份应来自维护者对连接目标的独立确认，
+不能把 CLI 本次读出的实际身份自动填回预期参数来绕过检查。
+口令仅放本地进程环境，不写入命令参数或日志。
+
+CLI 参数：
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| -expect-db | 必填 | 已独立核实的数据库名称 |
+| -expect-server-uuid | 必填 | 已独立核实的 MySQL 实例 UUID |
+| -mapping | deploy/elasticsearch/rule-chunks-v1.json | 新索引定义 |
+| -timeout | 5m | 正常重建流程的总上下文超时 |
+| -allow-empty | false | 显式允许发布空快照，默认禁止 |
+
+以下为 PowerShell 运行模板。先在同一终端设置数据库与 ES 环境变量，
+再填写独立核实的源身份；不要把占位符当作真实身份运行。
+
+```powershell
+& {
+    $ErrorActionPreference = 'Stop'
+
+    $expectedSourceDatabase = Read-Host '输入已独立核实的源库名'
+    $expectedSourceUUID = Read-Host '输入已独立核实的 MySQL 实例 UUID'
+
+    if ([string]::IsNullOrWhiteSpace($expectedSourceDatabase) -or
+        $expectedSourceDatabase -ne $expectedSourceDatabase.Trim()) {
+        throw '源库名不能为空或包含首尾空白。'
+    }
+    if ($expectedSourceUUID -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+        throw '实例 UUID 格式不正确。'
+    }
+    if ($env:DB_NAME -ne $expectedSourceDatabase) {
+        throw '当前进程 DB_NAME 与已核实源库名不一致。'
+    }
+
+    New-Item -ItemType Directory -Force '.scratch/elasticsearch/evidence' | Out-Null
+
+    go build -o .scratch/elasticsearch/reindex.exe ./cmd/reindex
+    if ($LASTEXITCODE -ne 0) {
+        throw 'CLI 构建失败，停止重建。'
+    }
+
+    $runID = [guid]::NewGuid().ToString('N')
+    $reportPath = ".scratch/elasticsearch/evidence/reindex-$runID.jsonl"
+    $errorPath = ".scratch/elasticsearch/evidence/reindex-$runID.stderr.log"
+
+    & ./.scratch/elasticsearch/reindex.exe `
+        -expect-db $expectedSourceDatabase `
+        -expect-server-uuid $expectedSourceUUID `
+        -timeout 5m 1> $reportPath 2> $errorPath
+    $reindexExit = $LASTEXITCODE
+
+    Set-Content -LiteralPath "$reportPath.exit.txt" -Value "EXIT_CODE=$reindexExit"
+    Get-Content -LiteralPath $reportPath
+
+    if ($reindexExit -ne 0) {
+        throw '重建未完整成功。保留报告，先核对阶段和发布状态，不自动重试。'
+    }
+}
+```
+
+首次正常重建保持 -allow-empty 关闭。
+空结果报错时先检查源库、发布状态和有效期；只有确实要发布空索引时才显式允许。
+
+重建最多导出 10000 个片段，单文档 JSON 上限 1 MiB，总量上限 64 MiB。
+Bulk 每批最多 500 条，同时受 4 MiB 实际请求字节预算限制；
+超限失败，不静默截断。这些是资源保护边界，不是性能指标。
+
+### 重建报告与故障处理
+
+stdout 输出逐行 JSON，started 记录拟使用的新索引名称，
+finished 记录阶段、结果、错误类别及退出码。
+新名称在实际创建之前就会输出，不能仅凭名称认定索引已创建。
+
+退出码 0 表示完整成功；1 表示执行、取消、超时、关闭资源或输出失败；
+2 表示参数、本地配置或 Mapping 准备失败。
+
+报告外层使用 stage、result 等小写字段；
+result 内保留 Go 字段名，例如 DocumentCount、Publication，
+发布状态读取 result.Publication.State。
+
+| 发布状态 | 含义及处理 |
+|---|---|
+| not_attempted | 尚未尝试切换；可能已经留下新索引，按报告核对具体阶段 |
+| applied | 已观察到发布生效；同时检查请求确认状态和退出码 |
+| old_observed | 复核时仍为旧目标，不能排除原请求稍后生效；暂停进一步发布 |
+| unknown | 无法可靠确定发布状态；保留资源并只读核对 |
+
+非零退出不等于 Alias 必然未切换，例如发布后资源关闭或报告输出仍可能失败。
+不要根据退出码自动回滚、删除索引或立即重试。
+
+需要核对时，只读查询当前 Alias，并与报告中的 OldIndex、NewIndex 比较：
+
+```powershell
+Invoke-RestMethod "$($env:ES_URL)/_alias/$($env:ES_INDEX_ALIAS)"
+```
+
+该命令要求当前终端已显式设置 ES_URL 和 ES_INDEX_ALIAS。
+固定实际物理目标后再检查其 Mapping、数量和样例。
+数量一致不能单独证明全部正文正确，少量样例也不是全量内容校验。
+
+发布异常后的只读恢复使用独立上下文，最多额外 5 秒；
+总超时不是硬实时进程终止保证。
+旧索引和失败索引不自动删除，清理前必须确认精确名称及引用关系。
+
+### 搜索 API
+
+请求方式：GET /api/v1/knowledge/search。
+需要 Bearer Token，数据库当前角色允许 user、support、admin。
+经过用户限流及角色检查后才进入搜索 Handler。
+
+| 参数 | 规则 |
+|---|---|
+| q | 自由文本，去首尾空白后最多 200 个 Unicode 字符 |
+| section | 章节文本，最多 500 个 Unicode 字符 |
+| article_number | 原始条款编号精确匹配，最多 64 个 Unicode 字符 |
+| document_id | uint64 规范十进制；省略或 0 表示不限 |
+| category_id | uint64 规范十进制；省略或 0 表示不限 |
+| limit | 省略或 0 使用 10；其他值为 1～50 |
+| highlight | 仅接受 true 或 false；默认 false |
+
+q、section、article_number 至少一个去空白后非空。
+只有分类或文档 ID 不能单独发起搜索。
+数字不接受负号、加号、前导零或显式空值；
+文本必须为合法 UTF-8。中文和特殊字符需正确 URL 编码。
+
+未知参数、重复参数、非法 URL 编码均拒绝。
+没有历史搜索开关，也没有分页参数。
+
+成功响应直接包含 items、count、limit，不额外包装 data。
+无命中时，例如默认 Limit：
+
+```json
+{
+  "items": [],
+  "count": 0,
+  "limit": 10
+}
+```
+
+每个 item 包含：
+- chunk_id、document_id、version_id、article_id、category_id；
+- chunk_index、article_order；
+- version、title、section_path、article_number、content、source_url；
+- effective_at、expires_at、score、highlights。
+
+ID 使用 JSON 数字，当前沿用 uint64 契约。
+接入 JavaScript 客户端时须考虑超过安全整数范围的精度问题，
+不能未经处理将大 ID 转为普通 Number。
+
+expires_at 可以为 null；无高亮时 highlights 为 {}。
+count 仅为当前返回条数，不能作为全部有效结果数量。
+
+### 搜索错误与排查
+
+| HTTP 状态 | code | 排查方向 |
+|---|---|---|
+| 400 | invalid_search_query | 参数名称、重复值、编码、字符上限、最低文本条件 |
+| 401 | unauthorized | 登录凭据及用户是否仍存在 |
+| 403 | forbidden | 数据库中的当前角色 |
+| 429 | rate_limited | 用户限流额度 |
+| 503 | rate_limit_unavailable | 限流依赖异常，请求尚未进入检索 |
+| 503 | search_index_not_ready | Alias 缺失，或固定的物理目标在搜索时返回 404 |
+| 503 | search_unavailable | ES 连接或可用性异常 |
+| 503 | search_verification_failed | 候选的 MySQL 当前状态复核失败 |
+| 502 | invalid_search_response | Alias 结构违反单目标等约束，或 ES 搜索响应结构、完整性、预算异常 |
+| 502 | search_backend_rejected | ES 拒绝搜索请求 |
+| 504 | request_timeout | 请求上下文超时 |
+| 500 | internal_error | 内部契约、依赖组装或其他内部错误 |
+
+错误响应为 code、message 两个字段，不返回原始 SQL、ES 响应或凭据。
+角色检查阶段的数据库错误可能返回 500；
+不能将所有 MySQL 故障统一描述为 search_verification_failed。
+
+客户端取消后不保证还能收到 JSON 错误响应。
+收到 200 空数组时再检查查询、当前有效版本与重建状态；
+收到依赖错误时先恢复依赖，不将故障当作“没有规则”。
+
+应用安全访问日志不记录搜索参数和令牌；
+代理及客户端的日志策略仍须单独核对，不记录完整 Authorization。
+
 ## 规则知识库后端
 
 本项目模拟智能客服的规则管理流程，不是 Bilibili 官方系统，
 也不保证与官方产品的接口或管理方式一致。
 知识库目前独立提供 HTTP 接口，尚未用于聊天回答。
 
-业务调用路径为：
+知识库管理及当前、历史内容读取的调用路径为：
 Gin Router → Handler → Service → GORM Repository → MySQL。
+
+规则搜索另走 Retriever 链路，由 ES 召回候选，再由 MySQL 批量复核；
+两类接口共享知识库领域数据，但不能互相绕过各自的校验。
 
 Handler 处理身份、参数和响应映射；Service 处理业务输入与能力边界；
 Repository 完成一致性读取、事务、锁和持久化。
@@ -909,7 +1296,11 @@ entry-001、entry-002 是录入编号；第二版仅完善项目标题，
 模拟演示约定不构成生产式官方资料验收结论。
 快照取得时间若未确认，继续标为待确认，不能用文件修改时间或核验时间冒充。
 
-虚构规则仅用于明确标记的测试文件和独立测试库 bili_support_test。
+虚构规则仅用于明确标记的测试材料和隔离测试资源。
+既有知识库测试使用独立测试库 bili_support_test；
+索引导出和搜索集成测试使用独立 MySQL 实例上的唯一
+es_export_it_、es_search_it_ 前缀数据库，以及隔离 ES 索引和别名。
+这些夹具的检索成功不能作为真实官方规则已导入正式索引的证据。
 HTTP 模拟演示使用已确认数据库身份的专用环境；
 自动化测试与人工演示不能同时写入同一测试库。
 真实业务库不能用于故障注入、测试清理或并发验收。
@@ -921,9 +1312,9 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 ### 知识库已知限制与验收边界
 
 - 无管理前端、自动抓取、预约发布、旧版一键恢复或隐式回退。
-- 不接入聊天、ES、Milvus、Kafka、RAG 或媒体处理。
+- 已提供独立 ES 规则搜索；尚未接入聊天、Milvus、混合检索、Kafka、RAG 或媒体处理。
 - 全文较大时可能超过现有请求体上限；不自动放宽限制。
 - 没有正式吞吐量、延迟或容量结论。
 - 人工来源核验不能保证页面此后不变，文件哈希不能单独证明官方真实性。
 - HTTP 成功结果不能替代真实事务、并发锁、故障回滚和操作记录一致性测试。
-- 阶段既有测试证据与最终全日回归分别记录；最终验收未完成前不宣称第7天全部通过。
+- 实现能力、隔离测试通过、真实规则演示和最终验收是不同结论，不能互相替代。

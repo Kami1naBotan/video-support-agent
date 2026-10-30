@@ -1,0 +1,81 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "chunk_id": {
+        "type": "keyword"
+      },
+      "document_id": {
+        "type": "keyword"
+      },
+      "version_id": {
+        "type": "keyword"
+      },
+      "article_id": {
+        "type": "keyword"
+      },
+      "category_id": {
+        "type": "keyword"
+      },
+      "publication_revision": {
+        "type": "keyword"
+      },
+      "chunk_index": {
+        "type": "long"
+      },
+      "article_order": {
+        "type": "long"
+      },
+      "version": {
+        "type": "keyword",
+        "index": false,
+        "doc_values": false
+      },
+      "title": {
+        "type": "text",
+        "analyzer": "cjk",
+        "search_analyzer": "cjk"
+      },
+      "section_path": {
+        "type": "text",
+        "analyzer": "cjk",
+        "search_analyzer": "cjk"
+      },
+      "article_number": {
+        "type": "keyword"
+      },
+      "content": {
+        "type": "text",
+        "analyzer": "cjk",
+        "search_analyzer": "cjk"
+      },
+      "source_url": {
+        "type": "keyword",
+        "index": false,
+        "doc_values": false
+      },
+      "status": {
+        "type": "keyword"
+      },
+      "is_current": {
+        "type": "boolean"
+      },
+      "effective_at": {
+        "type": "date",
+        "format": "strict_date_optional_time"
+      },
+      "expires_at": {
+        "type": "date",
+        "format": "strict_date_optional_time"
+      },
+      "withdrawn_at": {
+        "type": "date",
+        "format": "strict_date_optional_time"
+      }
+    }
+  }
+}

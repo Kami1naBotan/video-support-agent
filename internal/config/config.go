@@ -14,6 +14,7 @@ type Config struct {
 	Redis          RedisConfig
 	JWT            JWTConfig
 	LLM            LLMConfig
+	Elasticsearch  ElasticsearchConfig
 	TrustedProxies []string
 }
 
@@ -44,6 +45,12 @@ type LLMConfig struct {
 	Timeout string
 }
 
+type ElasticsearchConfig struct {
+	URL        string
+	IndexAlias string
+	Timeout    string
+}
+
 func Load() Config {
 	return Config{
 		AppName:  getEnv("APP_NAME", "bilibili-support-agent-api"),
@@ -72,6 +79,11 @@ func Load() Config {
 			Model:   getEnv("LLM_MODEL", ""),
 			APIKey:  os.Getenv("LLM_API_KEY"),
 			Timeout: getEnv("LLM_TIMEOUT", "30s"),
+		},
+		Elasticsearch: ElasticsearchConfig{
+			URL:        getEnv("ES_URL", "http://127.0.0.1:9200"),
+			IndexAlias: getEnv("ES_INDEX_ALIAS", "rule_chunks_current"),
+			Timeout:    getEnv("ES_TIMEOUT", "5s"),
 		},
 		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/llm"
+	"video-support-agent/internal/retrieval"
 	"video-support-agent/internal/service"
 
 	"github.com/gin-gonic/gin"
@@ -36,6 +38,34 @@ func classifyResponseError(err error) (int, ErrorResponse) {
 		status = http.StatusGatewayTimeout
 		code = "request_timeout"
 		message = "request timed out"
+	case errors.Is(err, retrieval.ErrInvalidQuery):
+		status = http.StatusBadRequest
+		code = "invalid_search_query"
+		message = "invalid search query"
+	case errors.Is(err, retrieval.ErrInvalidCandidates):
+		status = http.StatusInternalServerError
+		code = "internal_error"
+		message = "internal server error"
+	case errors.Is(err, retrieval.ErrIndexNotReady):
+		status = http.StatusServiceUnavailable
+		code = "search_index_not_ready"
+		message = "search index is not ready"
+	case errors.Is(err, retrieval.ErrVerificationFailed):
+		status = http.StatusServiceUnavailable
+		code = "search_verification_failed"
+		message = "search verification is temporarily unavailable"
+	case errors.Is(err, elasticsearch.ErrUnavailable):
+		status = http.StatusServiceUnavailable
+		code = "search_unavailable"
+		message = "search is temporarily unavailable"
+	case errors.Is(err, elasticsearch.ErrResponse):
+		status = http.StatusBadGateway
+		code = "invalid_search_response"
+		message = "search backend returned an invalid response"
+	case errors.Is(err, elasticsearch.ErrRejected):
+		status = http.StatusBadGateway
+		code = "search_backend_rejected"
+		message = "search backend rejected the request"
 	case errors.Is(err, service.ErrInvalidArgument):
 		status = http.StatusBadRequest
 		code = "invalid_argument"
