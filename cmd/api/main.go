@@ -12,7 +12,9 @@ import (
 	"video-support-agent/internal/auth"
 	"video-support-agent/internal/cache"
 	"video-support-agent/internal/elasticsearch"
+	"video-support-agent/internal/embedding"
 	"video-support-agent/internal/llm"
+	"video-support-agent/internal/milvus"
 	"video-support-agent/internal/repository"
 	"video-support-agent/internal/retrieval"
 
@@ -26,7 +28,10 @@ import (
 	"go.uber.org/zap"
 )
 
-const shutdownTimeout = 60 * time.Second
+const (
+	shutdownTimeout        = 60 * time.Second
+	vectorRetrievalTimeout = 35 * time.Second
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -39,6 +44,14 @@ func run() error {
 	cfg := config.Load()
 
 	if err := config.ValidateElasticsearchConfig(cfg.Elasticsearch); err != nil {
+		return err
+	}
+
+	if err := config.ValidateEmbeddingConfig(cfg.Embedding); err != nil {
+		return err
+	}
+
+	if err := config.ValidateMilvusConfig(cfg.Milvus); err != nil {
 		return err
 	}
 
@@ -100,6 +113,38 @@ func run() error {
 
 	appLogger.Info("retrieval dependencies initialized")
 
+	embeddingClient, err := embedding.NewClient(cfg.Embedding)
+	if err != nil {
+		return errors.New("initialize embedding client failed")
+	}
+	defer embeddingClient.Close()
+
+	vectorClient, err := milvus.NewClient(cfg.Milvus)
+	if err != nil {
+		return errors.New("initialize Milvus client failed")
+	}
+	defer vectorClient.Close()
+
+	vectorSearcher, err := milvus.NewSearcher(
+		embeddingClient,
+		vectorClient,
+		vectorRetrievalTimeout,
+	)
+	if err != nil {
+		return errors.New("initialize vector candidate searcher failed")
+	}
+
+	vectorRetriever, err := retrieval.NewMilvusRetriever(
+		vectorSearcher,
+		searchRepository,
+		vectorRetrievalTimeout,
+	)
+	if err != nil {
+		return errors.New("initialize vector retriever failed")
+	}
+
+	appLogger.Info("vector retrieval dependencies initialized")
+
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:                  cfg.Redis.Addr,
 		Password:              cfg.Redis.Password,
@@ -155,7 +200,7 @@ func run() error {
 
 	appLogger.Info("LLM client initialized")
 
-	r := router.NewWithRetriever(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient, searchService)
+	r := router.NewWithRetrievers(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient, searchService, vectorRetriever)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
 

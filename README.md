@@ -8,14 +8,19 @@ Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 流式模
 模型调用前读取最近历史，成功后通过 MySQL 事务保存用户消息和模型回答，
 再读取已提交的最近消息，整体更新 Redis 上下文快照。
 
-当前已有模型问答、SSE 流式输出、独立规则知识库后端及规则搜索 API。
-知识库支持草稿、来源核验、发布、版本切换、历史追溯和下线；
-搜索采用 Elasticsearch 片段级索引，并由 MySQL 批量复核候选的当前状态。
-支持正文关键词、标题加权、章节检索、条款编号精确查询、分类过滤、
-当前有效版本过滤和高亮。
+当前已有模型问答、SSE 流式输出、独立规则知识库后端及两类规则搜索 API。
+知识库支持草稿、来源核验、发布、版本切换、历史追溯和下线。
+
+Elasticsearch 搜索提供正文关键词、标题加权、章节检索、
+条款编号精确查询、分类过滤和高亮，候选经 MySQL 批量复核当前状态。
+
+Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
+根据自然语言问题召回规则片段，再从 MySQL 批量读取片段及完整条款，
+复核归属、当前版本、发布修订号和有效状态。
+两类搜索使用独立接口，没有合并排名，也不自动互相回退。
 
 规则搜索尚未接入聊天回答，也没有独立搜索前端。
-尚未实现 RAG、工具调用、Milvus、混合检索、Kafka 或 Kubernetes。
+尚未实现 RAG、工具调用、混合检索、Kafka 或 Kubernetes。
 
 项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
 
@@ -25,6 +30,9 @@ Go、Gin、GORM、MySQL、Redis、bcrypt、JWT、Zap、Docker Compose。
 Vue 3、TypeScript、Vite、Vue Router、Pinia、Axios、Element Plus、Nginx。
 Eino、Eino OpenAI 兼容模型适配器。
 Elasticsearch 8.19.0，通过 HTTP API 使用，采用独立 Docker Compose 项目部署。
+Milvus 3.0.3，通过 REST API 使用，采用独立 Docker Compose 项目部署。
+Windows 本地 Ollama 提供 bge-m3:567m 稠密 Embedding，向量维度为 1024；
+当前已验证的 Ollama 版本为 0.40.13。
 
 ## 已实现功能
 
@@ -57,6 +65,11 @@ Elasticsearch 8.19.0，通过 HTTP API 使用，采用独立 Docker Compose 项�
 - 统一 Retriever 接口及受认证、限流、数据库角色检查保护的规则搜索 API。
 - ES 候选经 MySQL 批量复核后返回；无命中与依赖故障分别处理。
 - 搜索结果携带规则来源、版本、条款与片段身份，以及可选高亮。
+- Ollama Embedding 身份校验、有界批处理及向量形状/数值校验。
+- Milvus 独立 Collection 重建、写入核验和 Alias 发布。
+- 独立自然语言向量搜索，支持文档、分类过滤及有界候选召回。
+- MySQL 当前状态复核与正文回源，分别返回片段 content 和完整条款 article_content。
+- 向量检索失败、超时、取消和回源超预算的明确错误处理。
 
 角色验证接口仅返回当前用户信息；知识库管理接口另设在管理员路由下。
 客服和管理员不会自动获得访问他人会话的权限。
@@ -446,7 +459,8 @@ flowchart TD
     Done --> Handler
 ```
 
-规则搜索使用独立链路，目前不向聊天模型提供检索结果：
+规则搜索使用独立链路，目前不向聊天模型提供检索结果。
+以下为 Elasticsearch 搜索与重建链路：
 
 ```mermaid
 flowchart TD
@@ -471,8 +485,37 @@ flowchart TD
 图中的 MySQL 读取分为两类：请求期复核候选，维护期导出重建快照。
 它们不是同一个事务，也不与 ES 组成分布式事务。
 
-健康检查只表示 HTTP 服务能够响应，不证明 ES、MySQL、
-Redis 或模型服务均可用。
+以下为 Milvus 向量搜索与重建链路：
+
+```mermaid
+flowchart TD
+    Caller["自然语言查询"] --> Gate["Gin：JWT、限流、数据库角色检查"]
+    Gate --> Handler["向量搜索 Handler"]
+    Handler --> Retriever["MilvusRetriever：固定查询时刻与总预算"]
+    Retriever --> Query["查询规范化与 Ollama Embedding"]
+    Query --> Search["解析 Alias，固定物理 Collection<br/>校验模型契约、Schema、索引和加载状态"]
+    Search --> Milvus[("Milvus：向量及关联元数据")]
+    Milvus --> Candidates["有界候选：身份、修订号、时间和分数"]
+    Candidates --> Hydrate["MySQL：同一只读 RR 快照<br/>检查读取预算、读取正文并复核当前状态"]
+    Hydrate --> Result["保留候选顺序，过滤后取 Limit<br/>返回片段及完整条款"]
+    Result --> Handler
+
+    CLI["人工串行执行 vector-reindex"] --> Export["MySQL 当前有效片段快照"]
+    Export --> Embed["Ollama 批量 Embedding 与身份校验"]
+    Embed --> Build["创建新 Collection、写入、建索引和加载"]
+    Build --> Verify["数量、元数据、向量及可检索性核验"]
+    Verify --> Publish["核验通过后发布 Alias"]
+    Publish --> Milvus
+```
+
+请求期的 MySQL 事务保证预算统计与正文读取使用同一快照，
+不与 Milvus 组成分布式事务。
+查询成功也不保证响应发送时没有新的发布或下线操作。
+
+健康检查只表示 HTTP 服务能够响应，不证明 Elasticsearch、Milvus、
+MySQL、Redis、Embedding 或聊天模型服务均可用。
+Embedding 和 Milvus 客户端在 API 启动时不执行远程可用性探测，
+实际查询仍可能因依赖状态或模型契约不符而失败。
 
 ## 数据职责
 
@@ -481,9 +524,24 @@ Redis 或模型服务均可用。
 | MySQL | 用户、角色、会话、完整消息历史，以及知识库文档、版本、原始条款、派生片段、分类、核验与操作记录 |
 | Redis | 短期上下文、限流计数 |
 | Elasticsearch | 从 MySQL 派生的规则片段索引，用于关键词召回、相关性排序和高亮；可以重建，不作为唯一事实来源 |
+| Milvus | 保存派生向量及关联、过滤、一致性元数据，提供向量候选检索；不保存规则正文 |
+| Ollama Embedding | 将片段或问题转换为指定模型空间中的稠密向量；不承担规则版本管理或聊天回答生成 |
 
 MySQL 保存已录入的规则内容、版本归属、当前版本指针、发布修订号及管理状态。
 Elasticsearch 保存检索所需的展开副本，不能替代 MySQL 的版本管理和事务约束。
+
+Milvus 返回的候选不能直接作为当前有效规则返回。
+MySQL 负责核对候选的文档、版本、条款、分类、发布修订号和时间信息，
+并读取 KnowledgeChunk.Content 与 RuleArticle.Content。
+
+向量响应中的 content 是检索片段，article_content 是所属条款的完整正文；
+article_content 不是整个 RuleVersion 的全文。
+当前普通知识库写入通常为每条条款生成一个 chunk_index=0 的片段，
+因此两段文本可能相同，但接口保留二者不同的语义。
+
+向量是可以重新生成的派生数据。
+模型变化时应重新生成文档向量并核验后发布，
+不能只修改查询侧模型或向量维度配置。
 
 ES 索引丢失或 Mapping 需要调整时，可以从 MySQL 的当前有效规则重新构建。
 重建不会恢复 MySQL 中不存在的内容，也不代表已经验证资料的官方真实性。
@@ -763,6 +821,411 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - 优雅关闭最多等待 60 秒；超时后强制关闭连接。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。
 
+## Milvus 向量检索
+
+### Embedding 与相似度
+
+Embedding 把文本转换为一组数值，使模型认为语义相近的文本
+在向量空间中更接近。它是检索表示，不是规则正文的替代品，
+也不是聊天模型生成的回答。
+
+当前使用 Ollama 的 bge-m3:567m 稠密向量，维度为 1024。
+本项目未使用该模型的稀疏向量或多向量检索能力。
+文档片段与查询问题使用兼容的模型空间，不为查询额外添加前缀或改写内容。
+
+Collection 使用 HNSW 索引及 COSINE 相似度。
+HNSW 是近似近邻搜索，分数用于当前查询内的相关性排序，
+不能解释为答案正确率、规则适用概率或不同查询之间统一的置信度。
+当前没有最低相关性阈值；存在候选时，系统可能返回相似度较低的结果。
+
+向量维度一致只是必要条件。
+模型 digest、服务版本、上下文长度和输入策略等身份信息也参与契约检查。
+当前重建器把模型契约记录在 Collection description 中；
+缺少该契约的旧集合不会仅因维度相同就被视为兼容。
+
+### Collection 中保存什么
+
+| 字段 | 类型 | 用途 |
+|---|---|---|
+| chunk_id | VarChar，主键 | 片段身份，十进制 uint64 字符串 |
+| document_id、version_id、article_id | VarChar | 文档、版本和条款关联 |
+| category | VarChar | 分类 ID，供分类过滤使用 |
+| publication_revision | VarChar | 发布修订号，供 MySQL 回源复核 |
+| version | VarChar | 版本标识 |
+| embedding | FloatVector，1024 维 | 稠密向量 |
+| effective_at | Int64 | UTC Unix 毫秒生效时间 |
+| has_expires_at | Bool | 是否存在失效时间 |
+| expires_at | Int64 | UTC Unix 毫秒失效时间，与 has_expires_at 配合解释 |
+
+ID 和发布修订号使用十进制字符串，避免把完整 uint64 范围压入有符号整数。
+category 保存分类 ID，不保存分类名称或正文。
+Collection 不保存标题、来源 URL、片段正文或完整条款；
+这些响应字段从 MySQL 读取。
+
+### 查询与当前状态
+
+查询入口为 GET /api/v1/knowledge/vector-search。
+它要求 JWT、用户限流和数据库当前角色检查，
+允许 user、support、admin 使用。
+
+查询只接受 q、document_id、category_id、limit。
+q 必须非空，去除首尾空白后最多 200 个 Unicode 字符；
+原始 URL 查询字符串最多 8 KiB。
+limit 默认 10、最大 50；显式 0 沿用默认值。
+不支持 section、article_number 或 highlight，传入这些参数会返回错误。
+
+候选预算为结果 limit 的 5 倍，最多 250。
+Milvus 先按文档、分类及有效期过滤并按相似度返回候选；
+MySQL 再检查当前版本指针、版本归属、published 状态、
+未下线、生效/失效时间和候选元数据。
+
+回源完成后保持候选顺序，过滤陈旧项，再取 limit。
+过滤后允许结果不足，不无限补搜。
+陈旧过滤可以阻止返回部分失效规则，但无法召回尚未导入 Milvus 的新内容。
+规则发布或修订后，需要人工安排重建，当前没有自动同步。
+
+无命中返回成功的空 items 数组。
+依赖失败返回明确错误，不伪装为空结果，也不自动回退 Elasticsearch。
+
+### 正文读取与资源边界
+
+MySQL 回源在同一个只读 Repeatable Read 事务中先统计文本字节数，
+再读取片段和完整条款，避免预算检查与正文读取看到不同快照。
+
+单行文本预算为 1 MiB，整批为 8 MiB。
+预算包括版本标识、标题、来源 URL、章节路径、条款编号、
+片段正文及完整条款正文，按字节而不是字符统计。
+候选预算范围内的读取可能在最终取 limit 前触发超限，
+不能通过静默截断正文规避。
+
+向量检索总预算为 35 秒，包含问题向量化、Milvus 搜索和 MySQL 回源。
+它受到现有 40 秒 HTTP 请求 Context 期限约束；
+依赖自身超时也可能更早结束请求。
+
+导入沿用已有 KnowledgeChunk.Content。
+当前没有通用长文本自动切分功能；
+Embedding 请求使用 truncate=false，超出输入或模型上下文限制时失败，
+不会静默丢弃文本末尾，也不会在重建时改写已发布片段。
+
+### 本地部署与健康检查
+
+Milvus 使用 compose.milvus.yaml，Compose 项目名为 video-support-agent-milvus，
+与 MySQL/Redis 及 Elasticsearch 的 Compose 项目独立。
+
+| 组件 | 当前配置 |
+|---|---|
+| Milvus | milvusdb/milvus:v3.0.3 |
+| etcd | quay.io/coreos/etcd:v3.5.25 |
+| MinIO | milvusdb/minio:RELEASE.2024-12-18T13-15-44Z |
+| Milvus API | http://127.0.0.1:19530 |
+| Milvus 健康端点 | http://127.0.0.1:9091/healthz |
+| Ollama | Windows 本地服务，http://127.0.0.1:11434 |
+
+从项目根目录按需启动：
+
+```powershell
+docker compose -f compose.milvus.yaml up -d
+docker compose -f compose.milvus.yaml ps
+Invoke-RestMethod -Uri 'http://127.0.0.1:9091/healthz' -TimeoutSec 5
+```
+
+etcd、MinIO 不向宿主机发布端口。
+milvus-volume-init 是一次性卷权限初始化服务，
+正常完成后退出 0，不要求它持续运行。
+Milvus、etcd、MinIO 使用命名卷；日常停止使用：
+
+```powershell
+docker compose -f compose.milvus.yaml stop
+```
+
+不要把删除卷作为普通启动排障步骤。
+当前 Compose 是本地开发配置，包含内部 MinIO 开发凭据，
+不是可直接暴露到公网的部署方案。
+
+安装 Windows Ollama 后，首次需要下载模型时执行：
+
+```powershell
+ollama pull bge-m3:567m
+ollama list
+ollama show bge-m3:567m
+```
+
+已有服务和模型时先检查，不重复启动服务或下载。
+Ollama 未运行时可通过桌面应用启动，或在独立终端执行 ollama serve。
+若 11434 已有服务监听，不再启动第二个实例。
+
+模型标签可能随远端更新变化，不能只凭名称判断兼容。
+可读取本机服务版本及完整 digest：
+
+```powershell
+Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/version' -TimeoutSec 5
+$models = Invoke-RestMethod -Uri 'http://127.0.0.1:11434/api/tags' -TimeoutSec 5
+$models.models | Select-Object name, digest
+```
+
+已验证的模型身份：
+
+- 模型：bge-m3:567m
+- digest：7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab
+- Ollama：0.40.13
+- 稠密维度：1024
+- 模型上下文长度：8192；这是模型上下文单位，不等同于 8192 个汉字
+
+服务版本、模型或输入策略变化后，应重新评估模型契约及重建需求，
+不能仅为消除错误而替换配置中的 digest。
+
+### API 与重建进程配置
+
+以下配置在实际启动 Go 进程的环境中设置：
+
+```text
+EMBEDDING_URL=http://127.0.0.1:11434
+EMBEDDING_MODEL=bge-m3:567m
+EMBEDDING_MODEL_DIGEST=7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab
+EMBEDDING_DIMENSIONS=1024
+EMBEDDING_CONTEXT_LENGTH=8192
+EMBEDDING_TIMEOUT=60s
+
+MILVUS_URL=http://127.0.0.1:19530
+MILVUS_DATABASE=default
+MILVUS_COLLECTION_ALIAS=rule_chunks_vector_current
+MILVUS_TIMEOUT=5s
+```
+
+MILVUS_URL 使用 19530，不使用健康检查端口 9091。
+URL 不允许嵌入用户名、密码、查询字符串或片段。
+超时必须为正数；依赖超时不能延长上层请求的总预算。
+
+Go 程序不会自动读取 .env。
+GoLand Run Configuration 与 Terminal 的环境变量也不自动共享。
+API 和 vector-reindex 应分别核对 DB_*、EMBEDDING_*、MILVUS_* 配置。
+
+API 的 MySQL 源库必须与目标向量集合的来源保持一致。
+不同数据库可能出现相同的数字 ID；仅匹配 chunk_id 不能证明来源正确。
+不能把隔离测试 Alias 接到正式业务数据库上。
+
+完整 API 仍需要原有 Redis、JWT、聊天模型及 Elasticsearch 配置。
+独立 vector-reindex CLI 使用 MySQL、Embedding 和 Milvus，
+不需要启动聊天模型调用或 Redis 限流链路。
+
+本项目早期初始化的 rule_chunks_vector_current 曾指向
+缺少模型 description 契约的空 Collection。
+该历史集合不能直接作为当前重建器生成的兼容索引使用。
+应先读取实际 Alias 目标与集合契约，再按下述重建流程发布新集合；
+不要通过手工补写 description 冒充已经重新生成和核验了向量。
+
+### 全量重建操作
+
+入口为 cmd/vector-reindex。重建会：
+
+1. 核对预期源库名称及 MySQL server_uuid。
+2. 导出当前有效规则片段的一致性快照。
+3. 完成有界 Embedding 批处理及模型身份校验。
+4. 创建全新的物理 Collection，写入并建立索引、加载。
+5. 核验数量、元数据、向量读回及自向量可检索性。
+6. 再次检查旧 Alias 目标，发布并独立观察切换结果。
+
+导入数据为空时拒绝发布，不用空集合自动清除既有检索目标。
+新集合名称由 CLI 随机生成，不覆盖原物理集合。
+
+重建前先独立核实源实例、数据库、资料来源及目标 Alias。
+可在连接到预期数据库的 SQL 客户端中读取：
+
+```sql
+SELECT DATABASE() AS database_name, @@server_uuid AS server_uuid;
+```
+
+预期值应来自独立核实，不要直接把当前进程配置复制成“核验结果”。
+使用专用测试环境时，还应确认它不会连接业务库或正式 Alias。
+
+CLI 参数如下：
+
+| 参数 | 默认值 | 含义 |
+|---|---|---|
+| -expect-db | 必填 | 独立确认的源数据库名称 |
+| -expect-server-uuid | 必填 | 独立确认的 MySQL 实例 UUID |
+| -timeout | 15m | 正常重建流程的总上下文预算 |
+| -milvus-timeout | 0 | 大于 0 时覆盖单次 Milvus 请求超时；0 使用 MILVUS_TIMEOUT |
+
+发布已尝试时，独立只读观察最多还可使用 10 秒。
+超时和取消不意味着已发出的发布操作必然没有生效。
+
+以下为 PowerShell 7 操作模板。
+执行前须在同一终端配置好目标进程环境，并确认本次重建目标：
+
+```powershell
+$expectedDatabase = Read-Host '输入已独立核实的数据库名称'
+$expectedServerUUID = Read-Host '输入已独立核实的 MySQL server_uuid'
+
+if ([string]::IsNullOrWhiteSpace($expectedDatabase) -or
+    [string]::IsNullOrWhiteSpace($expectedServerUUID)) {
+    throw 'Expected source identity is required'
+}
+
+if ([string]::IsNullOrWhiteSpace($env:DB_NAME) -or
+    $env:DB_NAME -cne $expectedDatabase) {
+    throw 'DB_NAME differs from the independently verified database'
+}
+
+if ([string]::IsNullOrWhiteSpace($env:MILVUS_COLLECTION_ALIAS)) {
+    throw 'Set the intended MILVUS_COLLECTION_ALIAS explicitly'
+}
+
+$runDirectory = Join-Path $env:TEMP (
+    'video-support-agent-vector-rebuild-' + [guid]::NewGuid().ToString('N')
+)
+New-Item -ItemType Directory -Path $runDirectory | Out-Null
+$binary = Join-Path $runDirectory 'vector-reindex.exe'
+
+go build -o $binary ./cmd/vector-reindex
+if ($LASTEXITCODE -ne 0) {
+    throw 'CLI build failed'
+}
+
+& $binary `
+    -expect-db $expectedDatabase `
+    -expect-server-uuid $expectedServerUUID `
+    -timeout 15m `
+    -milvus-timeout 60s `
+    1> (Join-Path $runDirectory 'rebuild.jsonl') `
+    2> (Join-Path $runDirectory 'rebuild.stderr.log')
+
+$rebuildExitCode = $LASTEXITCODE
+"REBUILD_EXIT_CODE=$rebuildExitCode"
+"REPORT_DIRECTORY=$runDirectory"
+
+if ($rebuildExitCode -ne 0) {
+    throw 'Rebuild failed; inspect the final report and actual alias before retrying'
+}
+```
+
+stdout 为 JSON Lines 报告，包含 started、stage、finished 事件；
+stderr 另行保存，不能把全部 stderr 文本直接等同于失败。
+使用编译后的 CLI 也便于保留原始退出码。
+
+成功须同时核对退出码 0、finished 事件、complete 阶段、
+预期源身份、导入数量和 publication.state=applied。
+仅有新 Collection 或写入完成不代表已经发布。
+
+### 发布状态与失败处理
+
+| publication.state | 含义与处理 |
+|---|---|
+| not_attempted | 尚未尝试切换；可能已创建新集合，按 stage 核对 |
+| applied | 观察到了新目标；仍需结合 CLI 退出码和错误分类判断整次操作 |
+| old_observed | 观察时仍为旧目标，不是永久未切换的保证 |
+| unknown | 无法确认发布结果，或观察到了其他目标；先核对实际 Alias |
+
+发布请求报错或父 Context 取消时，
+仍可能出现 state=applied 且 CLI 非零退出。
+这表示“观察到了切换”与“整次操作正常结束”是两个不同结论。
+
+先检查报告中的 new_collection、expected_old、observed_target、
+request_acknowledged、observation_succeeded 和 error_classes，
+再读取实际 Alias 目标。不要盲目重试发布、删除新集合或自动回滚。
+
+同一 Alias 的重建必须人工串行执行。
+发布前检查旧目标不是 CAS 锁，不能阻止所有并发发布竞争。
+旧集合及失败集合不会自动清理，需在核实引用、运行状态和保留需求后另行维护。
+
+### 向量搜索 API 使用
+
+```http
+GET /api/v1/knowledge/vector-search?q=...&limit=3
+Authorization: Bearer <本地有效令牌>
+Accept: application/json
+```
+
+参数值必须正确进行 URL 编码。
+document_id、category_id、limit 使用规范十进制非负整数，
+不接受前导零、加号、负数、空值或重复参数。
+document_id=0、category_id=0 表示不增加对应过滤；
+limit=0 使用默认值 10。
+
+结果结构如下，字段值为示意，不代表实际规则或测量结果：
+
+```json
+{
+  "items": [
+    {
+      "chunk_id": 101,
+      "document_id": 11,
+      "version_id": 21,
+      "article_id": 31,
+      "category_id": 1,
+      "chunk_index": 0,
+      "article_order": 1,
+      "version": "example-v1",
+      "title": "示意标题",
+      "section_path": "示意章节",
+      "article_number": "第一条",
+      "content": "检索片段",
+      "source_url": "https://example.invalid/rule",
+      "effective_at": "2026-01-01T00:00:00Z",
+      "expires_at": null,
+      "score": 0.75,
+      "highlights": {},
+      "article_content": "所属条款的完整正文"
+    }
+  ],
+  "count": 1,
+  "limit": 3
+}
+```
+
+count 是本次返回条数，不是所有相关规则总数。
+向量搜索不提供高亮，highlights 为对象而非 null。
+JSON 中 ID 当前输出为数字；需要无损处理完整 uint64 范围的客户端，
+应使用支持大整数的 JSON 解析方案，不能直接依赖 JavaScript Number。
+
+可复制的只读请求见 [vector-search.http](docs/http/vector-search.http)。
+它要求使用与当前 API 环境匹配的用户令牌及实际文档/分类 ID；
+保存请求材料不代表请求已经执行。
+
+### 向量搜索错误与排查
+
+| HTTP | code | 首先检查 |
+|---|---|---|
+| 400 | invalid_search_query | 空问题、长度、未知/重复参数及整数格式 |
+| 400 | vector_query_too_large | Embedding 输入或模型上下文限制 |
+| 401 | unauthorized | 令牌有效性、用户是否仍存在 |
+| 403 | forbidden | 数据库当前角色 |
+| 429 | rate_limited | 用户限流与 Retry-After |
+| 503 | rate_limit_unavailable | Redis 限流依赖 |
+| 503 | search_index_not_ready | Alias 是否存在、索引是否就绪、集合是否加载 |
+| 503 | vector_model_mismatch | 本机模型身份与客户端配置 |
+| 503 | vector_backend_rate_limited | Milvus 业务错误 1807 |
+| 503 | vector_search_unavailable | Embedding/Milvus 连接或服务状态 |
+| 503 | search_hydration_failed | MySQL 回源及数据有效性检查 |
+| 503 | search_hydration_limit | 单行或整批文本读取预算 |
+| 502 | invalid_vector_backend_response | 响应协议、Schema、集合模型契约 |
+| 502 | vector_backend_rejected | 后端拒绝请求 |
+| 504 | request_timeout | 上层总预算或依赖超时 |
+| 500 | internal_error | 未分类错误或内部结果契约问题 |
+
+当前代码把 Collection description 中的模型契约不匹配归为
+invalid_vector_backend_response（502）；
+不能把所有模型空间问题都理解为 vector_model_mismatch（503）。
+
+请求取消时服务端停止继续写响应，不保证客户端收到结构化错误 JSON。
+回源失败不能返回未经复核的 Milvus 候选；
+读取预算超限也不是客户端 HTTP 请求体超限。
+
+排障优先检查进程实际配置、模型身份、Alias 目标、集合契约和就绪状态，
+再检查 MySQL 当前版本与发布修订号。
+新版本无法命中时还应确认是否已经重建；
+旧版本被过滤后结果不足不意味着系统会自动补搜或恢复旧规则。
+
+### 已验证范围与当前限制
+
+已通过真实本地 Ollama、Milvus、隔离 MySQL 和受保护 API 的检索链路验证，
+包括三组预先声明的虚构中文语义用例、片段与完整条款回源、
+过滤和空结果、陈旧状态排除、依赖错误以及 API 正常关闭。
+
+这些结果只证明对应环境与用例，不代表正式官方规则已经导入，
+也不构成生产召回率、吞吐量、延迟或容量结论。
+当前没有混合检索、重排器、自动同步、聊天/RAG 接入或独立搜索前端。
+
 ## Elasticsearch 规则检索
 
 ### 索引粒度、Mapping 与 Alias
@@ -864,7 +1327,7 @@ ES 使用独立 Compose 项目，本地模式关闭认证与 TLS，仅绑定回�
 
 ### 本地部署与进程配置
 
-ES 使用独立 Compose 项目 go-ai-agent-es，不随原 MySQL/Redis 项目自动启动。
+ES 使用独立 Compose 项目 video-support-agent-es，不随原 MySQL/Redis 项目自动启动。
 以下命令在项目根目录执行；已运行的环境无需重复初始化索引。
 
 ```powershell
@@ -1127,7 +1590,7 @@ MySQL 是知识库已录入内容及管理状态的权威数据源。
 | KnowledgeDocument | 保存稳定 document_key、当前版本指针和 publication_revision；一个文档有多个版本 |
 | RuleVersion | 属于文档和一个分类；保存版本标识、标题、正文、来源、有效期、内容修订与管理状态 |
 | RuleArticle | 属于版本；保存章节路径、真实条款编号、顺序和完整条文 |
-| KnowledgeChunk | 属于条款；当前每条条款派生一个片段，chunk_index=0，不生成向量 |
+| KnowledgeChunk | 属于条款；当前普通写入每条条款派生一个 chunk_index=0 片段；独立向量重建读取片段生成 Embedding，知识库写入本身不自动向量化 |
 | RuleCategory | 预置分类；当前包含账号管理、投稿审核、版权申诉、社区规范、弹幕规范 |
 
 章节路径是条款字段，不单设章节表。没有官方条款编号时保留空编号，
@@ -1249,9 +1712,11 @@ is_withdrawn 和 is_current_effective。
 
 ### 启动、迁移及请求限制
 
-沿用前文的 MySQL、Redis、JWT 和 LLM 环境配置。
-完整 API 启动仍初始化现有依赖；
-知识库请求本身不调用模型，但当前没有独立的知识库启动模式。
+完整 API 启动需要配置 MySQL、Redis、JWT、聊天模型、
+Elasticsearch、Embedding 和 Milvus 相关依赖。
+普通知识库管理及详情查询不调用模型；
+向量搜索会调用 Embedding 服务，不调用聊天生成模型。
+当前没有独立的知识库启动模式。
 
 go.mod 当前声明 Go 1.27.1。
 数据库结构准备入口为 cmd/migrate，分类初始化入口为 cmd/seed，
@@ -1312,7 +1777,7 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 ### 知识库已知限制与验收边界
 
 - 无管理前端、自动抓取、预约发布、旧版一键恢复或隐式回退。
-- 已提供独立 ES 规则搜索；尚未接入聊天、Milvus、混合检索、Kafka、RAG 或媒体处理。
+- 已提供独立 Elasticsearch 搜索和 Milvus 向量搜索；尚未接入聊天、混合检索、Kafka、RAG 或媒体处理。
 - 全文较大时可能超过现有请求体上限；不自动放宽限制。
 - 没有正式吞吐量、延迟或容量结论。
 - 人工来源核验不能保证页面此后不变，文件哈希不能单独证明官方真实性。

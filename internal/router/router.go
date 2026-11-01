@@ -21,6 +21,10 @@ func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts ser
 }
 
 func NewWithRetriever(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever) *gin.Engine {
+	return NewWithRetrievers(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, nil)
+}
+
+func NewWithRetrievers(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever) *gin.Engine {
 	r := gin.New()
 
 	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
@@ -97,6 +101,10 @@ func NewWithRetriever(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager,
 	currentKnowledge := protected.Group("/knowledge")
 	currentKnowledge.Use(middleware.RequireRoles(currentUserService, model.RoleUser, model.RoleSupport, model.RoleAdmin))
 	currentKnowledge.GET("/search", knowledgeSearchHandler.Search)
+	if vectorRetriever != nil {
+		vectorSearchHandler := handler.NewKnowledgeVectorSearchHandler(vectorRetriever)
+		currentKnowledge.GET("/vector-search", vectorSearchHandler.Search)
+	}
 	currentKnowledge.GET("/documents/:document_id/current", knowledgeHandler.GetCurrent)
 	currentKnowledge.GET("/versions/:version_id", knowledgeHandler.GetHistory)
 	currentKnowledge.GET("/versions/:version_id/articles/:article_id", knowledgeHandler.GetHistoryArticle)

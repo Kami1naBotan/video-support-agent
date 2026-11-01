@@ -15,6 +15,8 @@ type Config struct {
 	JWT            JWTConfig
 	LLM            LLMConfig
 	Elasticsearch  ElasticsearchConfig
+	Embedding      EmbeddingConfig
+	Milvus         MilvusConfig
 	TrustedProxies []string
 }
 
@@ -51,6 +53,22 @@ type ElasticsearchConfig struct {
 	Timeout    string
 }
 
+type EmbeddingConfig struct {
+	URL           string
+	Model         string
+	ModelDigest   string
+	Dimensions    string
+	ContextLength string
+	Timeout       string
+}
+
+type MilvusConfig struct {
+	URL             string
+	Database        string
+	CollectionAlias string
+	Timeout         string
+}
+
 func Load() Config {
 	return Config{
 		AppName:  getEnv("APP_NAME", "bilibili-support-agent-api"),
@@ -84,6 +102,23 @@ func Load() Config {
 			URL:        getEnv("ES_URL", "http://127.0.0.1:9200"),
 			IndexAlias: getEnv("ES_INDEX_ALIAS", "rule_chunks_current"),
 			Timeout:    getEnv("ES_TIMEOUT", "5s"),
+		},
+		Embedding: EmbeddingConfig{
+			URL:   getEnv("EMBEDDING_URL", "http://127.0.0.1:11434"),
+			Model: getEnv("EMBEDDING_MODEL", "bge-m3:567m"),
+			ModelDigest: getEnv(
+				"EMBEDDING_MODEL_DIGEST",
+				"7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab",
+			),
+			Dimensions:    getEnv("EMBEDDING_DIMENSIONS", "1024"),
+			ContextLength: getEnv("EMBEDDING_CONTEXT_LENGTH", "8192"),
+			Timeout:       getEnv("EMBEDDING_TIMEOUT", "60s"),
+		},
+		Milvus: MilvusConfig{
+			URL:             getEnv("MILVUS_URL", "http://127.0.0.1:19530"),
+			Database:        getEnv("MILVUS_DATABASE", "default"),
+			CollectionAlias: getEnv("MILVUS_COLLECTION_ALIAS", "rule_chunks_vector_current"),
+			Timeout:         getEnv("MILVUS_TIMEOUT", "5s"),
 		},
 		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}
