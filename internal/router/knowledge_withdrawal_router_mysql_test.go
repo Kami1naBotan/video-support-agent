@@ -265,7 +265,15 @@ func TestKnowledgeWithdrawalActualRouterMySQL(t *testing.T) {
 			got = Request(r, "GET",
 				fmt.Sprintf("%s/articles/%d", path, a.ID), "", token, false)
 			WantJSON(t, got, 200, map[string]any{
-				"version": versionJSON, "article": articles[i], "state": state,
+				"identity": map[string]string{
+					"document_id": fmt.Sprintf("%d", v.DocumentID),
+					"version_id":  fmt.Sprintf("%d", v.ID),
+					"article_id":  fmt.Sprintf("%d", a.ID),
+					"category_id": fmt.Sprintf("%d", v.CategoryID),
+				},
+				"version": versionJSON,
+				"article": articles[i],
+				"state":   state,
 			})
 		}
 	}

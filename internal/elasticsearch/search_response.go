@@ -179,7 +179,10 @@ func decodeSearchSource(hit searchHit, opts retrieval.SearchOptions, at time.Tim
 		return fail("source expiry contradicts the search filters")
 	}
 
-	if (opts.DocumentID != 0 && opts.DocumentID != ids[1]) || (opts.CategoryID != 0 && opts.CategoryID != ids[4]) || (opts.ArticleNumber != "" && opts.ArticleNumber != source.ArticleNumber) {
+	if (opts.DocumentID != 0 && opts.DocumentID != ids[1]) ||
+		(opts.VersionID != 0 && opts.VersionID != ids[2]) ||
+		(opts.CategoryID != 0 && opts.CategoryID != ids[4]) ||
+		(opts.ArticleNumber != "" && opts.ArticleNumber != source.ArticleNumber) {
 		return fail("source identity contradicts the requested filters")
 	}
 

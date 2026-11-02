@@ -463,8 +463,19 @@ func TestKnowledgeHistoryHTTPPublicResponse(t *testing.T) {
 				})
 				w = managementRequest(r, "GET", historyArticleHTTPPath, "", token, false)
 				managementWantJSON(t, w, 200, map[string]any{
-					"version": wantVersion, "article": wantArticles[0], "state": wantState,
+					"identity": map[string]any{
+						"document_id": "11",
+						"version_id":  "21",
+						"article_id":  "91",
+						"category_id": "7",
+					},
+					"version": wantVersion,
+					"article": wantArticles[0],
+					"state":   wantState,
 				})
+				if got := w.Header().Get("Cache-Control"); got != "private, no-store" {
+					t.Fatalf("unexpected history cache policy: %q", got)
+				}
 				if historyCalls != 1 || articleCalls != 1 {
 					t.Fatalf("calls: history=%d article=%d", historyCalls, articleCalls)
 				}

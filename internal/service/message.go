@@ -38,6 +38,7 @@ type MessageService struct {
 	logger        *zap.Logger
 	chat          ChatResponder
 	streamChat    ChatStreamResponder
+	groundedChat  GroundedChatResponder
 	guard         *ConversationGuard
 }
 
@@ -47,6 +48,7 @@ func NewMessageService(messages MessageStore, conversations ConversationStore, c
 	}
 
 	streamChat, _ := chat.(ChatStreamResponder)
+	groundedChat, _ := chat.(GroundedChatResponder)
 
 	return &MessageService{
 		messages:      messages,
@@ -55,6 +57,7 @@ func NewMessageService(messages MessageStore, conversations ConversationStore, c
 		logger:        logger,
 		chat:          chat,
 		streamChat:    streamChat,
+		groundedChat:  groundedChat,
 		guard:         NewConversationGuard(),
 	}
 }
@@ -118,11 +121,11 @@ func (s *MessageService) Create(ctx context.Context, userID uint64, conversation
 	}
 
 	content = strings.TrimSpace(content)
-	if conversationID == 0 || content == "" || utf8.RuneCountInString(content) > 10000 {
+	if conversationID == 0 || content == "" || !utf8.ValidString(content) || utf8.RuneCountInString(content) > 10000 {
 		return nil, fmt.Errorf("%w: content must contain 1 to 10000 characters", ErrInvalidArgument)
 	}
 
-	if s.chat == nil {
+	if s.chat == nil && s.groundedChat == nil {
 		return nil, llm.ErrModelFailed
 	}
 
@@ -141,14 +144,13 @@ func (s *MessageService) Create(ctx context.Context, userID uint64, conversation
 		return nil, err
 	}
 
-	answer, err := s.chat.Reply(ctx, history, content)
+	reply, err := s.replyForMessage(ctx, history, content)
 	if err != nil {
 		return nil, err
 	}
 
-	answer = strings.TrimSpace(answer)
-	if answer == "" {
-		return nil, llm.ErrEmptyReply
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	userMessage := &model.Message{
@@ -160,7 +162,8 @@ func (s *MessageService) Create(ctx context.Context, userID uint64, conversation
 	assistantMessage := &model.Message{
 		ConversationID: conversationID,
 		Role:           "assistant",
-		Content:        answer,
+		Content:        reply.content,
+		Citations:      reply.citations,
 	}
 
 	if err := s.messages.CreatePair(ctx, userMessage, assistantMessage); err != nil {

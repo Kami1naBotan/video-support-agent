@@ -295,7 +295,15 @@ func TestKnowledgeSwitchActualRouterMySQL(t *testing.T) {
 		path += fmt.Sprintf("/articles/%d", s.Content.Articles[0].ID)
 		response = Request(r, "GET", path, "", token, false)
 		WantJSON(t, response, 200, map[string]any{
-			"version": versionJSON, "article": articles[0], "state": state,
+			"identity": map[string]string{
+				"document_id": fmt.Sprintf("%d", v.DocumentID),
+				"version_id":  fmt.Sprintf("%d", v.ID),
+				"article_id":  fmt.Sprintf("%d", s.Content.Articles[0].ID),
+				"category_id": fmt.Sprintf("%d", v.CategoryID),
+			},
+			"version": versionJSON,
+			"article": articles[0],
+			"state":   state,
 		})
 	}
 

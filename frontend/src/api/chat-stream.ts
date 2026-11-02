@@ -2,6 +2,7 @@ import { readToken } from '../auth/token'
 import { createSSEParser } from './sse-parser'
 import { decodeChatStreamEvent } from './chat-stream-event'
 import { ChatStreamRequestError } from './chat-stream-error'
+import type { RuleCitation } from './rule-citation'
 
 export interface StreamStartData {
     conversation_id: number
@@ -12,7 +13,7 @@ export interface StreamTokenData {
 }
 
 export interface StreamCitationData {
-    items: unknown[]
+    items: RuleCitation[]
 }
 
 export interface StreamErrorData {

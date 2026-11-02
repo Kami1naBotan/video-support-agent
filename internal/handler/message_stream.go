@@ -113,7 +113,7 @@ func (h *MessageHandler) CreateStream(c *gin.Context) {
 		return
 	}
 
-	if err := send(SSEEventCitation, gin.H{"items": []any{}}); err != nil {
+	if err := send(SSEEventCitation, gin.H{"items": result.AssistantMessage.Citations}); err != nil {
 		return
 	}
 

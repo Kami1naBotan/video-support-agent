@@ -1,5 +1,6 @@
 import type { ChatStreamEvent } from './chat-stream'
 import type { SSEFrame } from './sse-parser'
+import { decodeRuleCitations } from './rule-citation'
 
 function isObject(
     value: unknown,
@@ -56,13 +57,9 @@ export function decodeChatStreamEvent(
             }
 
         case 'citation':
-            if (!Array.isArray(data.items)) {
-                throw new Error('citation 事件的引用必须是数组')
-            }
-
             return {
                 event: 'citation',
-                data: { items: data.items },
+                data: { items: decodeRuleCitations(data.items) },
             }
 
         case 'error':

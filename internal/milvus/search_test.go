@@ -129,6 +129,10 @@ func (f *vsFixture) roundTrip(r *http.Request) (*http.Response, error) {
 			filter += ` and document_id == "` +
 				strconv.FormatUint(f.query.Options.DocumentID, 10) + `"`
 		}
+		if f.query.Options.VersionID != 0 {
+			filter += ` and version_id == "` +
+				strconv.FormatUint(f.query.Options.VersionID, 10) + `"`
+		}
 		if f.query.Options.CategoryID != 0 {
 			filter += ` and category == "` +
 				strconv.FormatUint(f.query.Options.CategoryID, 10) + `"`

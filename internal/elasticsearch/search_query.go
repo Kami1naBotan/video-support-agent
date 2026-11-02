@@ -62,6 +62,9 @@ func BuildSearchQuery(query string, opts retrieval.SearchOptions, at time.Time) 
 	if opts.DocumentID != 0 {
 		filters = append(filters, searchTerm("document_id", strconv.FormatUint(opts.DocumentID, 10)))
 	}
+	if opts.VersionID != 0 {
+		filters = append(filters, searchTerm("version_id", strconv.FormatUint(opts.VersionID, 10)))
+	}
 	if opts.CategoryID != 0 {
 		filters = append(filters, searchTerm("category_id", strconv.FormatUint(opts.CategoryID, 10)))
 	}

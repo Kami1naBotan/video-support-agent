@@ -27,6 +27,7 @@ type Retriever interface {
 
 type SearchOptions struct {
 	DocumentID uint64
+	VersionID  uint64
 	CategoryID uint64
 
 	ArticleNumber string

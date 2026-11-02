@@ -193,16 +193,19 @@ func (c *Client) checkSearchReady(ctx context.Context, target string) error {
 
 func searchFilter(q *PreparedQuery) string {
 	at := strconv.FormatInt(q.At.UnixMilli(), 10)
-	conditions := []string{
-		"effective_at <= " + at,
-		"(has_expires_at == false or expires_at > " + at + ")",
-	}
+
+	conditions := []string{"effective_at <= " + at, "(has_expires_at == false or expires_at > " + at + ")"}
+
 	if q.Options.DocumentID != 0 {
 		conditions = append(conditions, `document_id == "`+strconv.FormatUint(q.Options.DocumentID, 10)+`"`)
+	}
+	if q.Options.VersionID != 0 {
+		conditions = append(conditions, `version_id == "`+strconv.FormatUint(q.Options.VersionID, 10)+`"`)
 	}
 	if q.Options.CategoryID != 0 {
 		conditions = append(conditions, `category == "`+strconv.FormatUint(q.Options.CategoryID, 10)+`"`)
 	}
+
 	return strings.Join(conditions, " and ")
 }
 
@@ -263,7 +266,9 @@ func decodeSearchHit(data []byte, q *PreparedQuery) (SearchHit, error) {
 		return zero, fmt.Errorf("%w: inconsistent search expiration", ErrResponse)
 	}
 
-	if (q.Options.DocumentID != 0 && ids[1] != q.Options.DocumentID) || (q.Options.CategoryID != 0 && ids[4] != q.Options.CategoryID) {
+	if (q.Options.DocumentID != 0 && ids[1] != q.Options.DocumentID) ||
+		(q.Options.VersionID != 0 && ids[2] != q.Options.VersionID) ||
+		(q.Options.CategoryID != 0 && ids[4] != q.Options.CategoryID) {
 		return zero, fmt.Errorf("%w: search hit violates filters", ErrResponse)
 	}
 

@@ -46,7 +46,7 @@ func (s *MessageService) CreateStream(ctx context.Context, userID uint64, conver
 	}
 
 	content = strings.TrimSpace(content)
-	if content == "" || utf8.RuneCountInString(content) > 10000 {
+	if content == "" || !utf8.ValidString(content) || utf8.RuneCountInString(content) > 10000 {
 		return nil, fmt.Errorf("%w: content must contain 1 to 10000 characters", ErrInvalidArgument)
 	}
 
@@ -54,7 +54,7 @@ func (s *MessageService) CreateStream(ctx context.Context, userID uint64, conver
 		return nil, fmt.Errorf("%w: stream callbacks are required", ErrInvalidArgument)
 	}
 
-	if s.streamChat == nil {
+	if s.groundedChat == nil && s.streamChat == nil {
 		return nil, llm.ErrStreamUnsupported
 	}
 
@@ -87,18 +87,9 @@ func (s *MessageService) CreateStream(ctx context.Context, userID uint64, conver
 
 	stage = "generate"
 
-	answer, err := s.streamChat.ReplyStream(ctx, history, content, func(part string) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		return callbacks.OnChunk(part)
-	})
+	reply, err := s.streamReplyForMessage(ctx, history, content, callbacks.OnChunk)
 	if err != nil {
 		return nil, err
-	}
-
-	if strings.TrimSpace(answer) == "" {
-		return nil, llm.ErrEmptyReply
 	}
 
 	stage = "save"
@@ -115,7 +106,8 @@ func (s *MessageService) CreateStream(ctx context.Context, userID uint64, conver
 	assistantMessage := &model.Message{
 		ConversationID: conversationID,
 		Role:           "assistant",
-		Content:        answer,
+		Content:        reply.content,
+		Citations:      reply.citations,
 	}
 
 	if err := s.messages.CreatePair(saveCtx, userMessage, assistantMessage); err != nil {

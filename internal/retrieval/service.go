@@ -86,6 +86,10 @@ func (s *Service) Retrieve(ctx context.Context, query string, opts SearchOptions
 		if id == 0 {
 			return nil, fmt.Errorf("%w: candidate chunk ID must not be zero", ErrInvalidCandidates)
 		}
+
+		if opts.VersionID != 0 && candidate.Chunk.VersionID != opts.VersionID {
+			return nil, fmt.Errorf("%w: candidate violates version filter", ErrInvalidCandidates)
+		}
 		if _, duplicate := candidateIDs[id]; duplicate {
 			return nil, fmt.Errorf("%w: duplicate candidate chunk ID", ErrInvalidCandidates)
 		}

@@ -46,10 +46,18 @@ type knowledgeHistoryResponse struct {
 	State    knowledgeHistoryStateResponse   `json:"state"`
 }
 
+type knowledgeHistoryIdentityResponse struct {
+	DocumentID string `json:"document_id"`
+	VersionID  string `json:"version_id"`
+	ArticleID  string `json:"article_id"`
+	CategoryID string `json:"category_id"`
+}
+
 type knowledgeHistoryArticleResponse struct {
-	Version knowledgeHistoryVersionResponse `json:"version"`
-	Article ruleArticleResponse             `json:"article"`
-	State   knowledgeHistoryStateResponse   `json:"state"`
+	Identity knowledgeHistoryIdentityResponse `json:"identity"`
+	Version  knowledgeHistoryVersionResponse  `json:"version"`
+	Article  ruleArticleResponse              `json:"article"`
+	State    knowledgeHistoryStateResponse    `json:"state"`
 }
 
 func (h *KnowledgeHandler) GetHistory(c *gin.Context) {
@@ -117,7 +125,14 @@ func (h *KnowledgeHandler) GetHistoryArticle(c *gin.Context) {
 		return
 	}
 
+	c.Header("Cache-Control", "private, no-store")
 	c.JSON(http.StatusOK, knowledgeHistoryArticleResponse{
+		Identity: knowledgeHistoryIdentityResponse{
+			DocumentID: strconv.FormatUint(detail.Version.DocumentID, 10),
+			VersionID:  strconv.FormatUint(detail.Version.ID, 10),
+			ArticleID:  strconv.FormatUint(detail.Article.ID, 10),
+			CategoryID: strconv.FormatUint(detail.Version.CategoryID, 10),
+		},
 		Version: buildKnowledgeHistoryVersionResponse(detail.Version),
 		Article: buildKnowledgeHistoryArticleResponse(*detail.Article),
 		State:   buildKnowledgeHistoryStateResponse(detail.State),

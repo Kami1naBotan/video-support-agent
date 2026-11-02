@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/llm"
+	"video-support-agent/internal/rag"
 	"video-support-agent/internal/retrieval"
 	"video-support-agent/internal/service"
 
@@ -22,6 +23,18 @@ func classifyResponseError(err error) (int, ErrorResponse) {
 	code := "internal_error"
 	message := "internal server error"
 	switch {
+	case errors.Is(err, rag.ErrRetrievalFailed):
+		status = http.StatusServiceUnavailable
+		code = "rag_retrieval_unavailable"
+		message = "规则检索暂时不可用，请稍后再试"
+	case errors.Is(err, rag.ErrGenerationFailed):
+		status = http.StatusBadGateway
+		code = "rag_generation_failed"
+		message = "回答生成失败，请稍后再试"
+	case errors.Is(err, rag.ErrInvalidAnswer):
+		status = http.StatusBadGateway
+		code = "rag_invalid_answer"
+		message = "生成结果未通过校验，请稍后再试"
 	case errors.Is(err, llm.ErrModelTimeout):
 		status = http.StatusGatewayTimeout
 		code = "model_timeout"
@@ -66,7 +79,7 @@ func classifyResponseError(err error) (int, ErrorResponse) {
 		status = http.StatusBadGateway
 		code = "search_backend_rejected"
 		message = "search backend rejected the request"
-	case errors.Is(err, service.ErrInvalidArgument):
+	case errors.Is(err, service.ErrInvalidArgument), errors.Is(err, llm.ErrInvalidInput):
 		status = http.StatusBadRequest
 		code = "invalid_argument"
 		message = "invalid request"

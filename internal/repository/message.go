@@ -17,6 +17,10 @@ func NewMessageRepository(db *gorm.DB) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, message *model.Message) error {
+	if err := prepareMessageCitations(message); err != nil {
+		return fmt.Errorf("prepare message citations: %w", err)
+	}
+
 	err := r.db.WithContext(ctx).Omit("Conversation").Create(message).Error
 	if err != nil {
 		return fmt.Errorf("create message: %w", err)
@@ -37,6 +41,18 @@ func (r *MessageRepository) ListByConversationID(ctx context.Context, conversati
 }
 
 func (r *MessageRepository) CreatePair(ctx context.Context, userMessage *model.Message, assistantMessage *model.Message) error {
+	if userMessage == assistantMessage {
+		return fmt.Errorf("message pair requires distinct messages")
+	}
+
+	if err := prepareMessageCitations(userMessage); err != nil {
+		return fmt.Errorf("prepare user message citations: %w", err)
+	}
+
+	if err := prepareMessageCitations(assistantMessage); err != nil {
+		return fmt.Errorf("prepare assistant message citations: %w", err)
+	}
+
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Omit("Conversation").Create(userMessage).Error; err != nil {
 			return fmt.Errorf("create user message: %w", err)
@@ -95,4 +111,17 @@ func (r *MessageRepository) LatestIDByConversationID(ctx context.Context, conver
 	}
 
 	return ids[0], nil
+}
+
+func prepareMessageCitations(message *model.Message) error {
+	if message == nil {
+		return fmt.Errorf("message is required")
+	}
+
+	if message.Role != "assistant" && len(message.Citations) != 0 {
+		return model.ErrInvalidMessageCitations
+	}
+
+	message.Citations = message.Citations.Clone()
+	return nil
 }

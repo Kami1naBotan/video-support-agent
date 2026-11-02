@@ -184,7 +184,9 @@ func freezeVectorCandidates(candidates []Candidate, opts SearchOptions, at time.
 				return nil, fmt.Errorf("%w: invalid candidate expiration", ErrInvalidCandidates)
 			}
 		}
-		if (opts.DocumentID != 0 && chunk.DocumentID != opts.DocumentID) || (opts.CategoryID != 0 && chunk.CategoryID != opts.CategoryID) {
+		if (opts.DocumentID != 0 && chunk.DocumentID != opts.DocumentID) ||
+			(opts.VersionID != 0 && chunk.VersionID != opts.VersionID) ||
+			(opts.CategoryID != 0 && chunk.CategoryID != opts.CategoryID) {
 			return nil, fmt.Errorf("%w: candidate violates filters", ErrInvalidCandidates)
 		}
 		if _, exists := seen[chunk.ChunkID]; exists {

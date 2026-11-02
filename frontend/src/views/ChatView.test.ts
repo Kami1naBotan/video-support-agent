@@ -140,7 +140,7 @@ describe('ChatView streaming', () => {
     expect(submittedContent).toBe(question)
     expect(options.signal.aborted).toBe(false)
 
-    expect(page.text()).toContain('正在等待客服回答')
+    expect(page.text()).toContain('正在等待服务响应')
     expect(input.element.disabled).toBe(true)
 
     const sendButton = page.get<HTMLButtonElement>(
@@ -159,7 +159,7 @@ describe('ChatView streaming', () => {
     })
     await nextTick()
 
-    expect(page.text()).toContain('正在生成回答')
+    expect(page.text()).toContain('正在查阅规则并准备回答')
 
     options.onEvent({
       event: 'token',
@@ -258,7 +258,7 @@ describe('ChatView streaming', () => {
     )
     expect(page.text()).toContain('回答已完成并保存')
     expect(page.text()).not.toContain('正在加载消息')
-    expect(page.text()).not.toContain('正在生成回答')
+    expect(page.text()).not.toContain('正在查阅规则并准备回答')
 
     expect(input.element.disabled).toBe(false)
     expect(input.element.value).toBe('')

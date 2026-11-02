@@ -15,6 +15,7 @@ import (
 	"video-support-agent/internal/embedding"
 	"video-support-agent/internal/llm"
 	"video-support-agent/internal/milvus"
+	"video-support-agent/internal/rag"
 	"video-support-agent/internal/repository"
 	"video-support-agent/internal/retrieval"
 
@@ -193,14 +194,24 @@ func run() error {
 		return errors.New("initialize LLM model failed; check LLM configuration")
 	}
 
-	chatClient, err := llm.NewChatClient(chatModel, modelTimeout, appLogger)
+	hybridRetriever, err := retrieval.NewHybridService(searchClient, vectorSearcher, searchRepository, nil)
 	if err != nil {
-		return errors.New("initialize chat client failed")
+		return errors.New("initialize hybrid retrieval failed")
 	}
 
-	appLogger.Info("LLM client initialized")
+	loggedHybrid, err := retrieval.NewLoggedHybridRetriever(hybridRetriever, appLogger)
+	if err != nil {
+		return errors.New("initialize hybrid retrieval logging failed")
+	}
 
-	r := router.NewWithRetrievers(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatClient, searchService, vectorRetriever)
+	chatResponder, err := rag.NewResponder(loggedHybrid, chatModel, modelTimeout, appLogger)
+	if err != nil {
+		return errors.New("initialize RAG responder failed")
+	}
+
+	appLogger.Info("RAG chat dependencies initialized")
+
+	r := router.NewWithRetrievers(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatResponder, searchService, vectorRetriever)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
 

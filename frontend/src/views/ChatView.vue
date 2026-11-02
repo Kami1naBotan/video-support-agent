@@ -24,6 +24,9 @@ import {
   isUnauthorized,
 } from '../api/errors'
 
+import RuleCitations from '../components/RuleCitations.vue'
+import type { RuleCitation } from '../api/rule-citation'
+
 const router = useRouter()
 const auth = useAuthStore()
 const pageRevision = auth.revision
@@ -53,6 +56,7 @@ interface StreamTurn {
   conversationID: number
   question: string
   answer: string
+  citations: RuleCitation[]
   status: StreamStatus
   error: string
 }
@@ -70,8 +74,8 @@ const currentStream = computed(() => {
 })
 
 const streamStatusText: Record<StreamStatus, string> = {
-  waiting: '正在等待客服回答……',
-  streaming: '正在生成回答……',
+  waiting: '正在等待服务响应……',
+  streaming: '正在查阅规则并准备回答……',
   completed: '回答已完成并保存',
   stopped: '已停止接收，请刷新消息确认保存结果',
   failed: '本轮回答未确认完成',
@@ -325,6 +329,7 @@ async function sendMessage() {
     conversationID,
     question: content,
     answer: '',
+    citations: [],
     status: 'waiting',
     error: '',
   }
@@ -358,7 +363,7 @@ async function sendMessage() {
             break
 
           case 'citation':
-            // 今天不实现 RAG，服务端返回空引用数组。
+            turn.citations = event.data.items
             break
 
           case 'error':
@@ -609,6 +614,11 @@ onBeforeUnmount(stopPage)
                 </div>
 
                 <div class="message-content">{{ message.content }}</div>
+                <RuleCitations
+                    v-if="message.role === 'assistant'"
+                    :items="message.citations ?? []"
+                    @unauthorized="handleRequestError($event, '无法读取引用条款')"
+                />
               </li>
               <template v-if="currentStream">
                 <li class="message-item from-user">
@@ -630,8 +640,17 @@ onBeforeUnmount(stopPage)
                       class="message-content"
                   >{{ currentStream.answer }}</div>
 
+                  <RuleCitations
+                      :items="currentStream.citations"
+                      @unauthorized="handleRequestError($event, '无法读取引用条款')"
+                  />
+
                   <p class="stream-status" role="status">
-                    {{ streamStatusText[currentStream.status] }}
+                    {{
+                      currentStream.status === 'streaming' && currentStream.answer
+                          ? '已收到回答内容，正在等待完成确认……'
+                          : streamStatusText[currentStream.status]
+                    }}
                   </p>
 
                   <el-alert
