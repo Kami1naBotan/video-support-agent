@@ -17,6 +17,10 @@ var _ Generator = (*openai.ChatModel)(nil)
 var _ Streamer = (*openai.ChatModel)(nil)
 
 func NewChatModel(ctx context.Context, cfg config.LLMConfig) (*openai.ChatModel, error) {
+	return newChatModel(ctx, cfg, nil)
+}
+
+func newChatModel(ctx context.Context, cfg config.LLMConfig, extraFields map[string]any) (*openai.ChatModel, error) {
 	baseURL := strings.TrimSpace(cfg.BaseURL)
 	modelName := strings.TrimSpace(cfg.Model)
 	apiKey := strings.TrimSpace(cfg.APIKey)
@@ -48,10 +52,11 @@ func NewChatModel(ctx context.Context, cfg config.LLMConfig) (*openai.ChatModel,
 	outputLimit := maxOutputTokens
 
 	return openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL:   strings.TrimRight(baseURL, "/"),
-		Model:     modelName,
-		APIKey:    apiKey,
-		Timeout:   timeout,
-		MaxTokens: &outputLimit,
+		BaseURL:     strings.TrimRight(baseURL, "/"),
+		Model:       modelName,
+		APIKey:      apiKey,
+		Timeout:     timeout,
+		MaxTokens:   &outputLimit,
+		ExtraFields: extraFields,
 	})
 }

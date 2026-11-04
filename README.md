@@ -2,11 +2,15 @@
 
 基于 Bilibili 公开规则资料规划的个人学习项目，非官方客服服务。
 
-当前完成用户认证、会话与消息管理、Redis 缓存与限流、
-Vue 3 客服前端、Nginx 代理，以及基于 Eino 的普通与 SSE 有来源 RAG 问答。
+当前实现用户认证、会话与消息管理、Redis 缓存与限流、Vue 3 客服前端、
+Nginx 代理，以及基于 Eino 的规则问答与五工具 Agent。
+cmd/api 的普通 HTTP 和 SSE 聊天共用 Agent 消息编排；旧 RAG 与 ChatClient 入口继续保留。
 
-模型调用前读取最近历史，成功后通过 MySQL 事务保存用户消息和模型回答，
-再读取已提交的最近消息，整体更新 Redis 上下文快照。
+普通咨询读取已授权的最近历史；结构化确认请求直达确认执行路径。
+工单创建与聊天消息保存是两个独立事务：工单已经提交后，消息保存仍可能失败。
+两条聊天消息与 Run 的 saved 状态在同一 MySQL 事务中保存，再刷新 Redis 上下文快照。
+本次集成已完成隔离环境中的 HTTP/SSE、真实模型与数据库、浏览器确认及提交后断流恢复验证。
+验证范围为本项目功能链路，不代表生产政策有效、模型长期可靠性或性能容量已验证。
 
 当前已有模型问答、SSE 流式输出、独立规则知识库后端及两类规则搜索 API。
 知识库支持草稿、来源核验、发布、版本切换、历史追溯和下线。
@@ -19,10 +23,12 @@ Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
 复核归属、当前版本、发布修订号和有效状态。
 两类独立搜索 API 保留原有排序和错误语义；聊天通过 HybridService 并行召回、RRF 融合及 MySQL 回源，支持单路故障降级。
 
-普通与 SSE 聊天已接入 RAG，前端展示引用及历史条款状态。
-尚无独立搜索前端、实际 Rerank 模型、工具调用、Kafka 或 Kubernetes。
+前端展示规则引用、历史条款状态、工具执行过程、确认卡片与本人 Run 恢复结果。
+尚无独立搜索前端、实际 Rerank 模型、Kafka 或 Kubernetes。
 
-项目不是 Bilibili 官方客服，不能查询真实账号或办理申诉。
+项目不是 Bilibili 官方客服，不能查询真实账号或向平台办理申诉。
+本地工单只记录本系统申请，不代表平台受理或申诉通过。
+当前应用使用 NoAppealPolicies，不把未经核实的规则或用户陈述认定为生产申诉资格依据。
 
 ## 当前技术栈
 
@@ -55,8 +61,8 @@ Windows 本地 Ollama 提供 bge-m3:567m 稠密 Embedding，向量维度为 1024
 - 消息历史、消息发送、加载状态与错误提示。
 - 模型生成成功后，用户消息与模型回答在同一个 MySQL 事务中保存。
 - Nginx 托管 Vue 构建产物，并代理 /api 请求到 Gin。
-- 当前 RAG 使用 Eino 完整生成并校验回答，再通过 Gin SSE 发送正文；旧 ChatClient 保留逐片段流读取能力。
-- start、token、citation、error、done 五类流式事件。
+- 保留的独立 RAG 使用 Eino 完整生成并校验回答，再通过 Gin SSE 发送正文；旧 ChatClient 保留逐片段流读取能力。
+- 旧入口保留 start、token、citation、error、done；Agent 入口另有 agent_start、tool_start、tool_end、action_required、agent_result。
 - Vue 使用 Fetch 读取响应流，支持生成状态、主动停止和会话切换取消。
 - RAG 正文校验后发送，通过 MySQL 事务保存本轮问答与引用，提交成功后发送 citation 和 done。
 - Nginx 关闭 API 响应缓冲与缓存，支持 SSE 转发。
@@ -74,6 +80,11 @@ Windows 本地 Ollama 提供 bge-m3:567m 稠密 Embedding，向量维度为 1024
 - Top-K 规则上下文、严格回答结构与引用校验，无依据时说明材料不足。
 - 引用快照随助手消息持久化，前端支持查看历史条款及重新查询状态。
 - 混合检索与 RAG 分阶段耗时、命中数量及受控错误类别日志。
+- 五工具：规则搜索、条款详情、申诉资格检查、本地工单创建、本人工单状态查询。
+- Run/Call 审计、确认签名与原操作 Key 幂等创建；确认操作不交给模型代为批准。
+- HTTP/SSE 共用执行与消息保存路径，分别表达执行状态、工单副作用和消息保存状态。
+- 本人 Run 恢复查询与历史安全摘要；确认 Token 不进入历史或恢复存储。
+- 页面按用户和会话保存恢复定位信息；断线先只读恢复，不自动重放 SSE 或确认请求。
 
 角色验证接口仅返回当前用户信息；知识库管理接口另设在管理员路由下。
 客服和管理员不会自动获得访问他人会话的权限。
@@ -128,7 +139,7 @@ Docker Compose 会读取 `.env`，Go 程序不会自动加载该文件。
 | 变量 | 说明 |
 |---|---|
 | LLM_BASE_URL | OpenAI 兼容接口基础地址 |
-| LLM_MODEL | 模型名称，当前使用 qwen-plus |
+| LLM_MODEL | 显式填写经过验证的模型名称；代码不提供默认模型 |
 | LLM_API_KEY | 仅保存在本地的模型凭证 |
 | LLM_TIMEOUT | 模型超时，例如 30s；API 启动要求大于 0 且不超过 30s |
 
@@ -144,9 +155,33 @@ GoLand 运行配置中的环境变量也不会自动传入 Terminal 命令。
 普通单元测试使用模型替身，不依赖真实 Key，不产生模型调用费用。
 当前未提供可直接启动整个 API 的 Mock 模型模式。
 
-模型调用失败时返回明确错误，不自动重试；没有当前有效依据时，RAG 在调用模型前返回材料不足说明。
+Planner与Answer使用两个独立客户端，共用上述服务地址、模型、凭证和超时配置，没有额外的Planner/Answer环境变量。
+Planner 请求设置 parallel_tool_calls=false 和 temperature=0，服务端仍严格限制单步工具调用。
+当配置模型名为 gpt-6-astra 时，Planner 与 Answer 均发送 reasoning_effort=low；
+这些参数是否受第三方端点支持需实际验证，发送参数不证明其内部实现，也不保证确定性或零失败。
+所选服务必须支持当前Eino工具绑定、工具调用返回与结果回填协议，普通文本问答成功不能替代工具调用验证。
+模型调用失败时返回明确错误，不自动重试；旧RAG的无依据分支不调用生成模型，Agent由受控编排决定澄清、回答或人工建议。
 API 还需要后文所列 ES、Ollama Embedding 和 Milvus 配置，以及从同一知识库导出的有效索引。
 客户端初始化成功不代表索引已存在或服务当前可用；聊天单路降级不等于可以省略该路配置。
+
+### 确认签名配置
+
+当前Agent API启动必须配置签名器，即使暂时只使用文本咨询也不能省略：
+
+| 变量 | 配置要求 |
+|---|---|
+| APPEAL_CONFIRMATION_KEY_BASE64 | 独立生成的32个密码学随机字节，以标准带填充Base64编码；编码长度44字符 |
+| APPEAL_CONFIRMATION_ISSUER | 默认go-ai-agent-appeal |
+| APPEAL_CONFIRMATION_AUDIENCE | 默认go-ai-agent-appeal-create |
+
+Issuer与Audience为1～128字节可打印ASCII，不允许空白字符。签名密钥不得复用JWT_SECRET。
+配置缺失、非规范Base64或解码长度不符会停止API启动，不会静默禁用确认校验。
+使用本地密码学随机数生成器生成密钥，保存到本地受控配置，不提交、截图或写入前端变量。
+程序只校验格式和长度，不能证明人工填写的字节具有足够随机性。
+
+确认凭据有效期为10分钟，绑定用户、会话、操作Key、申请指纹和策略摘要。
+更换密钥或签名作用域会使旧凭据无法通过当前验证；不要以修改密钥处理普通业务错误。
+多个API实例需使用一致签名配置。配置有效不证明数据库、模型或检索服务可用。
 
 ### 迁移与启动
 
@@ -165,6 +200,8 @@ GET http://127.0.0.1:8080/health
 
 当前健康检查只表示 HTTP 服务可响应，不检查所有依赖的实时状态。
 消息表需要 nullable JSON 类型的 citations 列；旧消息可保留 SQL NULL，API 统一输出空数组。
+Agent版本还需工单、业务记录、Run/Call审计表，以及消息可空agent_run_id关联、外键和Run/角色唯一约束。
+API启动不会自动执行迁移；迁移是数据库写操作，应先核对目标库及备份安排。
 确认目标库并按项目迁移流程准备结构，不能把隔离库迁移成功等同于应用库已迁移。
 
 ## 前端开发与 Nginx 联调
@@ -273,7 +310,118 @@ Authorization: Bearer <access_token>
 
 会话归属来自 JWT，不能通过请求体中的 user_id 指定。
 
+### Agent 消息与本人恢复契约
+
+下表为当前 cmd/api 默认 Agent 入口。所有请求均要求登录并校验本人会话归属。
+
+| 方法与路径 | 用途 | 成功响应 |
+|---|---|---|
+| `POST /api/v1/conversations/:id/messages` | 文本咨询或结构化确认 | 201，用户消息及 Agent 扩展 |
+| `POST /api/v1/conversations/:id/messages/stream` | 同一业务请求的 SSE 输出 | 200 开始响应，终态以事件及恢复结果判断 |
+| `GET /api/v1/conversations/:id/messages` | 本人消息历史 | 200，消息数组 |
+| `GET /api/v1/conversations/:id/agent-runs/:run_id` | 本人 Run 只读恢复 | 200，存储摘要与本次观察 |
+
+两个 POST 共用请求格式，顶层必须且只能包含 content 或 confirmed_action。
+文本请求示例：
+
+```json
+{"content":"请说明本地人工复核申请需要哪些信息"}
+```
+
+确认请求为 `{"confirmed_action": <服务端卡片中的原对象>}`，尖括号表示说明，不是可发送 JSON。
+必须原样保留该对象的七个字段：
+
+| 字段 | 类型与约束 |
+|---|---|
+| subject_type | account / content / other |
+| subject_ref | 申请对象引用字符串 |
+| reason | 申请原因字符串 |
+| intake_mode | standard / manual_review |
+| idempotency_key | 服务端生成的规范小写 UUIDv4，重试不换 Key |
+| policy_digest | 64 位小写十六进制策略摘要 |
+| confirmation_token | 服务端签名的专用确认凭据 |
+
+请求解码拒绝未知字段、大小写不符的字段名、重复字段、null、尾随 JSON 及两种模式混用；
+请求体上限为 64 KiB。身份与历史由服务端取得，确认有效性和业务条件仍由服务端检查。
+不要将整张卡片作为 confirmed_action，也不要复制文档示例来伪造签名凭据。
+
+普通成功响应顶层保留用户消息的 id、conversation_id、role、content、created_at、citations，
+并包含 agent_run_id、agent、messages，必要时包含 action_required。
+顶层 content 是用户消息；助手正文在 agent.content，保存后的历史也可读取助手消息。
+messages 包含 user_message_id 与 assistant_message_id，表示成对保存回执。
+旧聊天构造入口可只返回原 Message，客户端保留其兼容解码。
+
+agent 公开字段如下，可选对象无值时省略；citations 和 tools 始终为数组：
+
+| 字段 | 含义 |
+|---|---|
+| run_id（可选） | 本次执行标识；Run 建立前失败时可能不存在 |
+| execution_status | running / completed / failed / cancelled / timed_out / unknown |
+| decision | answer / clarify / handoff / confirmation_required / ticket_created / ticket_status / failed |
+| reason_code | 受控业务或执行原因码，不是顶层 HTTP 错误码 |
+| business_effect | none / committed / unknown，表示工单副作用 |
+| message_save_status | not_attempted / saved / failed / unknown，表示聊天消息保存 |
+| audit_pending | 执行记录是否仍待核对 |
+| content、citations | 受校验正文及规则引用 |
+| tools | Call 摘要：call_id、sequence、tool_name、status、error_code、business_effect、audit_pending |
+| ticket（可选） | 创建结果：ticket_id、initial_status、created_at、replayed |
+| ticket_status（可选） | 查询结果：ticket_id、status、created_at、updated_at |
+
+工具名为 search_rule、get_rule_detail、check_appeal_eligibility、create_appeal_ticket、query_ticket_status。
+工具状态为 started / succeeded / rejected / failed / cancelled / timed_out / unknown。
+当前本地工单状态为 submitted 或 pending_review，不代表平台工单状态。
+
+action_required 包含 run_id、confirmed_action、eligibility、reason_code、initial_status、issued_at、expires_at。
+eligibility 为 eligible / ineligible / needs_more_info / manual_review；卡片存在不等于工单已创建。
+确认 Token 只通过该专用实时卡片交付，不进入工具事件、历史摘要或恢复结果。
+
+非 2xx 响应包含 code、message，并可能同时包含 agent、messages 及已保存用户消息字段。
+客户端必须先保留这些业务事实，不能因 HTTP 失败就丢弃已提交工单或保存回执。
+典型 Agent 错误映射如下；认证、限流、会话归属等通用错误仍使用各自映射：
+
+| HTTP | code | 解释 |
+|---|---|---|
+| 400 | invalid_argument / appeal_needs_more_info | 参数无效或资料不足 |
+| 404 | agent_resource_not_found | Agent 资源不存在或不可访问 |
+| 409 | appeal_idempotency_conflict | 原 Key 对应不同申请内容 |
+| 409 | appeal_confirmation_required / appeal_precondition_changed | 确认凭据或业务条件需要重新核对 |
+| 409 | agent_state_conflict | 执行状态冲突，应先恢复 |
+| 422 | appeal_ineligible | 资格不允许创建 |
+| 408 / 504 | agent_cancelled / agent_timeout | 执行取消或超时，不推定工单回滚 |
+| 502 | agent_invalid_result / agent_model_failed | 结果协议或模型调用失败 |
+| 503 | agent_message_save_unconfirmed / appeal_outcome_unknown | 消息保存或工单提交尚未确认 |
+| 503 | agent_audit_unavailable / agent_unavailable | 执行记录或服务暂不可用 |
+
+历史消息保留原 Message 字段；关联 Run 的消息另有 agent_run_id 和 agent 摘要。
+该摘要包含 run_id、execution_status、decision、reason_code、business_effect、message_save_status、started_at、可选 finished_at。
+运行中 Run 的 decision 可以是空字符串。历史的 agent 是摘要，不是普通响应中的完整 agent 结果。
+旧消息可没有 Run 关联。摘要按去重 Run 分批读取，不向客户端暴露原始审计、签名 Token 或工具原始参数。
+
+恢复成功响应包含：
+
+| 字段 | 解释 |
+|---|---|
+| stored | 持久化 Run 摘要，结构与历史摘要一致 |
+| business_effect | 本次只读恢复观察到的工单副作用 |
+| recovery_code | none / outcome_unknown / idempotency_conflict |
+| audit_pending | 执行记录与观察结果是否仍待核对 |
+| message_save_status | 本次消息保存观察结果 |
+| messages（可选） | 已核实的消息对回执 |
+| ticket（可选） | 已观察到的原工单创建结果 |
+| tools | 公开 Call 摘要数组 |
+
+stored 与外层观察值可能不同；GET 恢复不自动修补审计记录，也不重新创建工单。
+若消息回执读取失败，错误响应仍可能包含 recovery，其中的 committed 与 ticket 必须保留。
+部分错误结果只能用于展示已知事实，不能直接解锁提交。404 也不是“工单肯定不存在”的证明。
+
+Run ID、Call ID、操作 Key 为规范小写 UUIDv4；工单及规则引用 ID 为十进制字符串，禁止转为 JavaScript Number。
+消息与会话 ID 保持现有 JSON 数字契约，前端只接受正的安全整数。
+时间为 RFC3339 格式字符串，可带小数秒。可选字段省略与字段值为 null 不是同一个协议含义。
+
 ## RAG 检索、引用与回答
+
+本节的生成、旧错误映射与预算描述适用于保留的 rag.Responder 路径；
+混合检索与引用基础设施仍被 Agent 复用。当前默认聊天协议以“Agent 消息与本人恢复契约”和下方 SSE 协议为准。
 
 ### 并行召回与 RRF
 
@@ -287,7 +435,7 @@ RRF 使用各路名次计算 `sum(1 / (60 + rank))`，名次从 1 开始，两�
 Rerank 是对候选进一步重排的接口，当前注入 nil，保持现有顺序；没有部署额外重排模型。
 
 HybridOptions 支持文档、版本、分类过滤，版本过滤只能缩小当前有效集合，不能恢复旧版本。
-当前聊天请求仅接收 content，TopK 固定 5，未开放这些过滤项或独立混合搜索 HTTP API。
+旧 RAG 聊天请求接收 content，TopK 固定 5，未开放这些过滤项或独立混合搜索 HTTP API。
 独立 ES 与向量搜索接口继续保留自己的参数和错误契约。
 
 ### 生成与引用
@@ -299,7 +447,7 @@ HybridOptions 支持文档、版本、分类过滤，版本过滤只能缩小当
 消息的 citations 和 SSE citation.items 使用相同引用结构，包含 ref_id、文档/版本/条款/分类/片段身份、
 规则标题、版本、章节、原编号、来源和检索时刻。引用中的各类 ID 为十进制字符串，不转为 JavaScript Number。
 旧消息与无依据回复的 citations 为 []；有依据回复只保存实际使用的引用。
-普通 POST 保持返回已保存用户消息的接口约定，完整助手回答与引用通过消息历史读取。
+旧 RAG 普通 POST 返回已保存用户消息，助手回答与引用通过消息历史读取；Agent 普通 POST 另有完整 agent 结果扩展。
 
 Vue 展示实时及历史引用；详情按具体版本/条款读取，并通过字符串 identity 匹配引用。
 快照说明回答当时引用了什么；“查看条款/重新查询”显示该次查询观察到的当前、被替代、过期或下线状态。
@@ -359,29 +507,44 @@ event: token
 data: {"content":"你好"}
 ```
 
-| 事件 | data 示例 | 含义 |
+| 事件 | data 字段 | 含义 |
 |---|---|---|
 | start | `{"conversation_id":1}` | 开始本轮流式处理 |
+| agent_start | run_id | 本次 Agent 执行标识 |
+| tool_start | run_id、call_id、sequence、tool_name、status、business_effect、audit_pending、replayed | 工具开始；status=started，business_effect=none，replayed=false |
+| tool_end | 同上，另有 error_code、duration_ms，可选 ticket_id | 工具终态；耗时为非负整数毫秒，sequence 当前范围为 1～5 |
+| action_required | 专用确认卡片对象 | 展示原申请与确认凭据，不等同提交 |
+| agent_result | 完整 agent 结果 | 消息保存前的执行快照 |
 | token | `{"content":"你好"}` | 新增文本片段，不保证对应单个字或单个模型 Token |
 | citation | `{"items":[]}` | 保存后的引用快照；有依据回答携带引用对象，材料不足等回复为空数组 |
-| error | `{"code":"model_timeout","message":"模型响应超时，请稍后重试"}` | 本轮处理失败 |
-| done | `{"user_message_id":10,"assistant_message_id":11}` | 本轮问答已成功提交 MySQL |
+| error | code、message，可选 run_id、agent、messages | 失败终态；可能仍有已提交工单或已保存消息 |
+| done | run_id、user_message_id、assistant_message_id、message_save_status、agent | 保存成功终态，message_save_status=saved，agent 为保存后最终快照 |
 
-当前 RAG 成功路径的事件与保存顺序为：
+文本和 confirmed_action 请求均可使用此 SSE 入口，严格请求规则与普通 HTTP 相同。
+正常 Agent 成功路径的事件与保存顺序为：
 
 ```text
-start → token（完整、已校验正文一次）→ 事务保存 → citation → done
+start → agent_start → (tool_start → tool_end)*
+      → [action_required] → agent_result → token
+      → 消息对与 saved 同事务提交 → citation → done
 ```
 
-RAG 首次正文需要等待检索、完整生成及校验，不承诺逐模型 Token 实时展示。
-旧 ChatClient 的流式分支仍允许多个 token 事件，但不是当前 cmd/api 的 RAG 默认路径。
+星号表示工具调用可出现零次或多次，方括号表示可选事件。
+tool_end 的 error_code 即使成功也要提供 none；tool_start 不携带耗时和错误码。
+tool_end 中 committed 或 replayed=true 要有 ticket_id。事件不公开工具原始参数或原始结果。
+正常确认卡片只在执行完成且审计不待核对时发送；失败路径可能提前结束，不要求完整出现上述序列。
+
+Agent 正文是受校验的完整结果，不承诺逐模型 Token 输出。
+旧 RAG 流仍为 start → token → 保存 → citation → done；旧 ChatClient 还可发送多个 token。
+旧 done 仅有两条消息 ID，旧 error 仅有 code/message；前端保留兼容，但 Agent 流不能使用旧 done 收尾。
 
 流开始前失败，返回 HTTP 错误状态和 JSON。
 流开始后失败，通过 error 事件报告，不再发送 done；
 客户端断开时，服务端可能无法继续发送任何事件。
 
 HTTP 200 只表示流式响应已经开始，不代表回答生成或保存成功。
-连接结束但未收到 done 时，应查询历史确认，不能自动重试提交。
+连接结束但未收到 done 时，应先按已取得的 Run ID 恢复，再核对历史消息，不能自动重试提交。
+同一流中 error 与 done 互斥。agent_result 不是保存回执，客户端应以 done.agent 更新最终保存状态。
 
 ### 前端读取方式
 
@@ -390,7 +553,8 @@ SSE 仍是 HTTP 响应，但服务端持续写入事件并及时 Flush，
 
 当前接口需要 POST JSON 和 Bearer 认证，因此前端使用
 Fetch + ReadableStream + TextDecoder 读取 SSE，没有使用原生 EventSource。
-当前客户端不提供断线重连或断点续传。
+当前客户端不自动重连或重放 SSE。前端严格校验事件字段、枚举、Run/Call 关联及顺序；
+未知事件或无效数据会中止读取，不静默忽略。响应结束未见 done 不能当作成功。
 
 SSE 适合“客户端提交一次问题、服务端持续推送回答”的场景。
 WebSocket 更适合需要持续双向通信的场景，例如实时语音和协同操作。
@@ -399,25 +563,25 @@ WebSocket 更适合需要持续双向通信的场景，例如实时语音和协�
 
 请求 Context 传递给 Service 和 Eino 模型调用。
 客户端断开或主动停止后，支持 Context 的检索、生成及读取操作响应取消。
-旧 ChatClient 流式分支还会退出读取并关闭 reader；当前 RAG 使用完整生成调用。
+旧 ChatClient 流式分支还会退出读取并关闭 reader；Agent 回调发送失败会取消工作，前端始终释放流 reader。
 
 Context 是协作式取消机制，不会强制终止任意阻塞代码，
 也不保证远程模型平台停止推理或计费。
 
-模型生成过程中失败或取消，不保存本轮问答。
-SSE 完整生成及校验成功、正文回调返回后，保存使用 context.WithoutCancel 派生的独立 Context，
-并设置 3 秒超时。因此进入保存阶段后，即使客户端断开，
-本轮问答仍可能成功保存。
+Agent 执行失败或发送失败时，要结合 business_effect 判断收尾；committed 或 unknown 仍会有界尝试保存确定性业务结果。
+工单创建、审计收尾、消息保存不是一个覆盖全部步骤的事务，不能笼统宣称失败即全部回滚。
+Agent 复用共享 3 秒收尾预算并受更早截止约束，不为每个收尾步骤重新分配 3 秒。
+无业务副作用的失败不会把未经校验的部分模型回答当作正式历史保存。
 
 done 仅在事务提交成功后发送。
-停止接收不等于数据库回滚，应刷新历史确认最终结果。
+停止接收不等于数据库回滚，应先恢复 Run，再核对历史回执；即使响应发送失败，提交事实也可能已经成立。
 
 回答先在内存中累积，完成后一次事务保存用户消息和助手消息。
 不逐 Token 写数据库，以减少数据库往返、更新与锁开销，
 并避免把尚未完整生成的回答当成正式历史记录。
 
-当前 RAG 与旧模型流读取均要求模型结束原因为 stop。
-输出达到长度上限等非正常结束情形会报告失败，不保存部分回答。
+旧 RAG 与旧模型正文流要求完整正常结束；Agent Planner 的工具调用响应另有协议校验，不能套用“所有调用必须 stop”的规则。
+输出达到长度上限等非法结果不能当作有效回答；已发生的业务副作用仍须单独保留。
 
 ### Nginx 配置
 
@@ -477,7 +641,7 @@ try {
 --no-buffer（即 -N）关闭 curl 自身的输出缓冲，
 --include（即 -i）显示 HTTP 响应头。
 
-正常情况下先看到 start；RAG 完整生成并校验后发送 token，保存成功后发送 citation、done。
+正常情况下先看到 start、agent_start；工具与执行结果事件之后才发送正文，保存成功后发送 citation、done。
 输出阶段按 Ctrl+C 可以模拟客户端断开。
 
 将 sseBaseURL 改为 http://127.0.0.1:8080，
@@ -489,8 +653,54 @@ try {
 
 ## 当前架构
 
-当前 cmd/api 将 HybridService 和 Eino 模型组装为 rag.Responder，同时用于普通与 SSE 聊天。
-Vue 经 Vite 或 Nginx 访问 Gin；认证、限流、会话归属及历史读取后进入下图。
+当前 cmd/api 组装真实消息、工单及审计仓储、确认签名器、五工具和独立 Planner/Answer 模型，
+通过同一个 MessageService.CreateAgent 支持普通 HTTP 与 SSE。
+Vue 经 Vite 或 Nginx 访问 Gin；JWT 提供身份，服务端校验会话归属，客户端不能提供可信身份或历史。
+
+```mermaid
+flowchart TD
+    UI["Vue：咨询、确认卡片、工具状态"] --> HTTP["Gin：JWT、限流、严格请求解码"]
+    HTTP --> MS["MessageService.CreateAgent：归属、并发保护与共享收尾预算"]
+    MS --> MODE{"请求类型"}
+    MODE -->|"普通咨询"| HISTORY["读取本人已授权历史"]
+    HISTORY --> EXEC["Agent：Planner 决策与有界工具循环"]
+    MODE -->|"结构化确认"| CONFIRM["确认直达：校验原申请、签名与操作 Key"]
+    EXEC --> TOOLS["五工具适配：参数校验与可信身份传递"]
+    TOOLS --> RULES["HybridService / KnowledgeService：规则依据"]
+    TOOLS --> APPEAL["AppealTicketService：资格、本人工单查询"]
+    CONFIRM --> WRITE["写前审计授权与工单幂等事务"]
+    WRITE --> DB[("MySQL：工单与业务记录")]
+    EXEC --> AUDIT[("MySQL：Run / Call 审计")]
+    CONFIRM --> AUDIT
+    RULES --> EXEC
+    APPEAL --> EXEC
+    EXEC --> RESULT["受校验回答或结构化业务结果"]
+    WRITE --> RESULT
+    RESULT --> SAVE["消息对与 Run.saved 同事务保存"]
+    SAVE --> CACHE["刷新 Redis 最近历史快照"]
+    CACHE --> OUT["普通响应 / SSE 保存后 done"]
+    UI --> READ["本人 Run GET：只读恢复"]
+    READ --> AUDIT
+    READ --> DB
+    READ --> RECEIPT["核对消息回执，区分 stored 与本次观察"]
+```
+
+图中工具循环并不表示所有工具每轮必定执行。创建工单必须经过用户明确确认与服务端写许可；
+模型输出工具调用不能代替授权。查询工具只允许读取当前用户可访问的业务数据。
+
+三类状态分别解释：execution_status 表示执行过程，business_effect 表示工单副作用，
+message_save_status 表示聊天消息保存。执行失败或连接断开不撤销已提交工单；
+缓存失败也不撤销 MySQL 已提交消息。正常 Agent 流中的 agent_result 早于消息保存，
+done 携带保存后的最终结果；终态事件可能因断线无法送达，应按 Run 查询恢复。
+
+前端 sessionStorage 中的 Agent 恢复记录仅保存用户、会话、Run 与可选操作 Key；确认 Token 和申请正文只留在当前页面内存。
+刷新不复活确认卡片，也不自动重发请求。若请求发出后尚未收到 Run ID 就断线，
+当前按 Run 查询接口不能精确定位该次执行，页面保留未定位标记并提示人工核对。
+
+### 保留的独立 RAG 路径
+
+下图描述仍保留的 rag.Responder 与旧聊天构造入口，不是当前 cmd/api 的默认 Agent 路径。
+Agent 的规则工具复用混合检索和知识服务，而不是把整个旧 RAG 消息流程再次嵌套执行。
 
 ```mermaid
 flowchart TD
@@ -588,11 +798,12 @@ Embedding 和 Milvus 客户端在 API 启动时不执行远程可用性探测，
 
 | 组件 | 用途 |
 |---|---|
-| MySQL | 用户、角色、会话、完整消息历史，以及知识库文档、版本、原始条款、派生片段、分类、核验与操作记录 |
+| MySQL | 用户、角色、会话、完整消息历史、Agent Run/Call审计、本地工单与业务记录，以及知识库文档、版本、条款、片段、分类和核验记录 |
 | Redis | 短期上下文、限流计数 |
 | Elasticsearch | 从 MySQL 派生的规则片段索引，用于关键词召回、相关性排序和高亮；可以重建，不作为唯一事实来源 |
 | Milvus | 保存派生向量及关联、过滤、一致性元数据，提供向量候选检索；不保存规则正文 |
 | Ollama Embedding | 将片段或问题转换为指定模型空间中的稠密向量；不承担规则版本管理或聊天回答生成 |
+| 浏览器 sessionStorage 中的 Agent 恢复记录 | 按用户/会话隔离的恢复定位信息，不保存确认 Token 或申请正文，不作为提交事实来源 |
 
 MySQL 保存已录入的规则内容、版本归属、当前版本指针、发布修订号及管理状态。
 Elasticsearch 保存检索所需的展开副本，不能替代 MySQL 的版本管理和事务约束。
@@ -645,9 +856,21 @@ GET 消息历史接口始终读取 MySQL，当前尚未实现分页，也不负�
 占用保护在处理结束时释放，包括模型失败、超时和数据库保存失败。
 
 这是单实例内的并发保护，不提供跨进程协调，也不等同于请求幂等。
-客户端不自动重试消息提交，结果不确定时先查询历史。
+客户端不自动重试消息提交，Agent结果不确定时先按Run查询恢复，再核对历史回执。
 
-当前 RAG 输入限制：
+| Agent范围 | 当前约束 |
+|---|---|
+| 请求总期限 | 最多40秒，并受父请求更早截止约束 |
+| 普通Agent工作期限 | 最多36秒，同时在总截止前预留4秒 |
+| 模型子调用 | LLM_TIMEOUT大于0且不超过30秒，并受剩余预算约束 |
+| 模型与工具次数 | 模型调用预算最多6次；工具调用序号最多5 |
+| 共享收尾 | 首次使用启动最多3秒；审计、恢复、消息保存和缓存刷新共用，不逐步骤重新计时 |
+| 本人历史/Run读取 | 服务内部5秒上限，受父请求约束 |
+
+这些是资源上限而非延迟承诺，不能相加为允许总耗时，也不是QPS或并发容量指标。
+确认直达不调用Planner/Answer、不加载模型历史，但仍检查权限、确认凭据、写前审计和业务条件。
+
+保留的独立 RAG 输入限制（不能直接套用为Agent全部输入规则）：
 
 - 最多读取最近 20 条历史；按完整问答轮次保留最近连续后缀，裁剪不删除数据库历史。
 - 消息接口允许 1～10000 个字符；问题超过检索上限 200 个 Unicode 字符时，返回缩短问题的说明，不调用检索或模型，不静默截断。
@@ -656,7 +879,7 @@ GET 消息历史接口始终读取 MySQL，当前尚未实现分页，也不负�
 - 历史只提供对话背景，不作为本次规则事实来源；引用必须来自本次检索的证据集合。
 
 这些是文本字节和条目上限，不是精确 Token 数或性能结论。
-旧 ChatClient 仍保留其输入超限错误逻辑；当前 RAG 使用上述分流与上下文预算。
+旧 ChatClient 仍保留其输入超限错误逻辑；独立 RAG 使用上述分流与上下文预算。
 模型请求设置 max_tokens=1024，要求上游限制输出 Token 数量。
 达到输出上限时回答可能被截断，不能据此保证回答完整。
 本地 HTTP 测试已验证该参数发出，当前服务端的实际兼容性在最终真实问答中确认。
@@ -717,16 +940,17 @@ Nginx 内置错误日志仍可能包含请求 URI，不能将凭证或正文放�
 旧认证版本的响应不能清除新登录状态。
 
 取消请求不代表服务器操作已回滚。
-创建会话和发送消息不自动重试，结果不确定时先查询历史。
+创建会话不自动重试，应核对会话列表；Agent消息结果不确定时先恢复Run，再核对消息历史。
 
 普通模型调用在失败时记录固定日志文本和 error_kind，
 不记录供应商原始错误正文或完整模型配置。
 
-当前 RAG 记录 hybrid_retrieval（两路/融合/回源/重排耗时、候选与最终命中数量、降级及错误类别）和
-rag_response（检索/生成是否调用、耗时、输入预算、引用数量与结果）。SSE 的 Service 另记 chat stream finished。
+混合检索记录hybrid_retrieval（两路/融合/回源/重排耗时、候选与最终命中数量、降级及错误类别）。
+保留的RAG路径另有rag_response（检索/生成是否调用、耗时、输入预算、引用数量与结果），旧流式Service另记chat stream finished。
 这些日志不写问题、条款或生成正文、令牌及模型密钥；暂未汇总为生产延迟分位数或业务成功率。
 
-以下 model stream 日志属于保留的旧 ChatClient 流式分支，不能要求当前 RAG 请求一定产生：
+以下日志及结果表描述保留的旧聊天路径，不能要求当前Agent请求一定产生，也不能用其saved字段代替工单提交状态。
+Agent应分别核对Run/Call安全摘要、business_effect、message_save_status和本人恢复结果，不打印原始审计或确认凭据。
 
 | 日志 | 字段 | 含义 |
 |---|---|---|
@@ -771,6 +995,63 @@ duration 是对应调用阶段的经过时间，不是首段输出延迟，
 
 本地 HTTP 测试验证请求取消能传递到 Eino 适配器及 HTTP 连接。
 这不代表远端模型平台一定停止推理或停止计费。
+
+## Agent 使用与故障操作
+
+### 本人权限与人工受理
+
+登录后选择自己的会话。客服或管理员角色不自动获得他人的会话、Run或工单读取权限。
+恢复路由验证JWT身份及会话/Run归属；知道UUID或工单号不构成授权。
+消息接口不接受客户端指定的user_id、历史或任意工具执行指令。
+
+普通咨询可搜索规则、读取条款、检查资格或查询本人工单。模型提出写操作不代表用户授权。
+当前注入NoAppealPolicies；缺少核实政策时走人工复核，不虚构eligible。
+用户需核对卡片的对象、原因、受理方式和有效期，明确勾选后才提交本地工单。
+standard对应本地submitted，manual_review对应本地pending_review；ineligible或needs_more_info不能直接创建。
+系统没有接入平台申诉提交或真人客服转接，handoff只表示建议人工核对。
+
+### 确认、重复操作与恢复
+
+1. 确认使用卡片原confirmed_action七个字段，不修改原因、Key、摘要或Token。
+2. 点击后立即锁定操作，连续点击不生成新Key。后端以用户与操作Key识别幂等申请，同Key不同载荷返回冲突。
+3. 已提交时读取原工单结果，不因聊天消息保存失败而创建第二张工单；成功幂等重放与重新创建不同。
+4. 停止生成、超时或断线后，先GET本人Run，再核对历史中两条消息的ID、角色和Run关联，不自动重放SSE。
+5. 只有完整恢复成功、执行已收尾、审计不待核对、业务明确为none且消息保存不是unknown，前端才允许原确认操作进入重试判断。
+6. 重试还要求原确认对象仍在页面内存、凭据未过期，并重新勾选；仍提交原Key和原载荷。
+7. 已确认未提交但凭据过期时，可放弃卡片后重新咨询；未知结果不得以换Key绕过核对。
+
+恢复中的stored是持久化摘要，外层是本次只读观察；两者不一致可能使audit_pending持续存在。
+GET恢复不自动修补审计或补写消息。持续待核对需人工排查，反复刷新不保证自动收敛。
+非2xx恢复响应的部分结果只能保留事实，不能直接解除操作限制。
+
+### 刷新、切换与退出
+
+发送前先写sessionStorage恢复标记，取得Run ID后补全；记录按用户与会话隔离，普通刷新保留定位信息。
+恢复记录不保存申请正文或确认Token，不作为业务事实来源；损坏或存储失败不等于从未发起操作。
+切换会话取消旧连接，旧请求返回不能覆盖新会话或新身份。普通卸载清理内存，保留恢复定位记录。
+主动退出、登录身份重置或认证失效时，清理本标签页恢复记录及内存确认对象。
+
+刷新后只恢复只读结果，不能从历史或操作Key重新生成确认Token；确认未提交后如需继续，应重新咨询获取卡片。
+sessionStorage不是跨标签页协调机制，单实例会话guard不是分布式锁；数据库幂等约束仍是业务保障。
+请求发出但Run ID尚未收到时，现有接口无法精确定位；保留未定位提示并人工核对，不用最新历史猜测结果。
+退出清理不撤销服务端工单；重新登录后历史可帮助找到已保存Run，但不保证找回所有未定位执行。
+
+### 常见故障处理
+
+| 现象 | 检查与操作 |
+|---|---|
+| initialize appeal confirmation failed | 检查Go进程三项APPEAL_CONFIRMATION变量、Base64规范和字节数，不输出密钥 |
+| 模型能聊天但工具调用失败 | 检查实际服务/模型的工具协议支持，不删除校验或自动回退裸模型 |
+| 卡片不可提交 | 核对保存、审计、勾选、有效期与受理模式，不手改Token |
+| appeal_idempotency_conflict | 原Key对应不同申请，保留原操作核对，不换Key掩盖冲突 |
+| 工单已提交但消息未确认保存 | 保留工单号，查询Run与回执，不显示为工单撤销 |
+| 恢复仍running/unknown或audit_pending | 稍后只读查询；持续不收敛则人工排查，不自动重试写请求 |
+| 401 | 身份失效，清理状态并重新登录，不继续使用旧确认对象 |
+| 403/404 | 核对本人会话和资源标识，不据此认定从未提交 |
+| 恢复存储不可用或损坏 | 保持当前页面已有结果并人工核对，不清空标记后盲目重发 |
+
+排查可提供脱敏错误码、状态及必要Run关联信息；不要分享登录Token、确认Token、签名密钥、申请正文或原始审计。
+运行验证分别覆盖真实事务、模型工具协议和HTTP/SSE/浏览器链路。构建成功只证明编译，不证明这些行为通过。
 
 ## 测试
 
@@ -856,6 +1137,13 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 
 ## 当前已验证的场景
 
+以下为既有版本保留的验证范围，不自动扩展为当前Agent集成链路的验收结论。
+当前 Agent 另已在隔离环境验证普通 HTTP/SSE、真实模型五工具场景、真实 MySQL 工单与消息事务、
+原操作 Key 重放、本人恢复与越权拒绝；浏览器验证确认门槛、提交后下游断流、刷新恢复、会话切换、退出清理与陌生用户隔离。
+真实双路检索采用明确标注的虚构验收规则，证明技术链路，不证明生产规则或申诉资格。
+真实模型固定三轮五场景通过；另一次浏览器只读查询记录 model_failed，工具未执行且无业务副作用。
+后一次查询成功不消除该失败记录，现有记录不能确定供应商内部原因。
+
 - 注册、重复用户名、密码哈希及真实登录。
 - 缺少或无效 Token 被拒绝。
 - /me 返回数据库当前用户信息。
@@ -882,9 +1170,9 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - 注册和登录已有基础 IP 限流，但不能防御分布式暴力破解；同一 NAT 网络的用户共享额度。
 - 固定窗口限流允许窗口交界处出现突发请求。
 - Redis 与 MySQL 不保证强一致，没有缓存补偿机制。
-- 消息提交尚无请求幂等机制。
+- 普通咨询尚无跨请求幂等键；工单确认使用原操作 Key 幂等创建，同一 Run 的消息对另有唯一约束。
 - 角色变更影响后续检查，不会撤销已经通过检查的在途请求。
-- 已接入 RAG；未接 Casbin、工具调用型 Agent、Kafka、Kubernetes。
+- 已接入 RAG 与工具调用型 Agent；未接 Casbin、Kafka、Kubernetes。
 - 尚无正式性能压测结果。超时配置属于功能约束，不能作为 QPS、首段延迟、取消耗时或并发容量指标。
 - 当前日志提供模型阶段与 Service 阶段耗时，尚未形成首段延迟、取消传播耗时及业务成功率的指标统计。
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。

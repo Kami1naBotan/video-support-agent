@@ -6,6 +6,12 @@ import (
 )
 
 func TestRunRejectsInvalidElasticsearchConfig(t *testing.T) {
+	// 仅用于配置校验测试，不用于运行服务。
+	t.Setenv("APPEAL_CONFIRMATION_KEY_BASE64",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("APPEAL_CONFIRMATION_ISSUER", "config-test")
+	t.Setenv("APPEAL_CONFIRMATION_AUDIENCE", "config-test")
+
 	tests := []struct {
 		name  string
 		field string

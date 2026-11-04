@@ -6,6 +6,7 @@ import { getCurrentUserAPI, loginAPI } from '../api/auth'
 import type { CurrentUser, LoginRequest } from '../api/auth'
 import { isUnauthorized } from '../api/errors'
 import { readToken, removeToken, saveToken } from '../auth/token'
+import { clearRecoveryCheckpoints } from '../chat/recovery-checkpoint'
 
 export const useAuthStore = defineStore('auth', () => {
     const token = ref(readToken())
@@ -22,6 +23,7 @@ export const useAuthStore = defineStore('auth', () => {
 
     function logout() {
         cancelPending()
+        clearRecoveryCheckpoints()
         revision.value++
         token.value = ''
         user.value = null

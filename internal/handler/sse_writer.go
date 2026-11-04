@@ -8,7 +8,16 @@ import (
 
 func writeSSEEvent(w io.Writer, event SSEEvent, data any) error {
 	switch event {
-	case SSEEventStart, SSEEventToken, SSEEventCitation, SSEEventError, SSEEventDone:
+	case SSEEventStart,
+		SSEEventToken,
+		SSEEventCitation,
+		SSEEventError,
+		SSEEventDone,
+		SSEEventAgentStart,
+		SSEEventToolStart,
+		SSEEventToolEnd,
+		SSEEventActionRequired,
+		SSEEventAgentResult:
 	default:
 		return fmt.Errorf("unsupported SSE event: %q", event)
 	}

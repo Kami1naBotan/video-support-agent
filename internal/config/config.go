@@ -6,18 +6,19 @@ import (
 )
 
 type Config struct {
-	AppName        string
-	Env            string
-	Port           string
-	LogLevel       string
-	Database       DatabaseConfig
-	Redis          RedisConfig
-	JWT            JWTConfig
-	LLM            LLMConfig
-	Elasticsearch  ElasticsearchConfig
-	Embedding      EmbeddingConfig
-	Milvus         MilvusConfig
-	TrustedProxies []string
+	AppName            string
+	Env                string
+	Port               string
+	LogLevel           string
+	Database           DatabaseConfig
+	Redis              RedisConfig
+	JWT                JWTConfig
+	AppealConfirmation AppealConfirmationConfig
+	LLM                LLMConfig
+	Elasticsearch      ElasticsearchConfig
+	Embedding          EmbeddingConfig
+	Milvus             MilvusConfig
+	TrustedProxies     []string
 }
 
 type DatabaseConfig struct {
@@ -38,6 +39,12 @@ type JWTConfig struct {
 	Secret string
 	Issuer string
 	TTL    string
+}
+
+type AppealConfirmationConfig struct {
+	KeyBase64 string
+	Issuer    string
+	Audience  string
 }
 
 type LLMConfig struct {
@@ -91,6 +98,17 @@ func Load() Config {
 			Secret: os.Getenv("JWT_SECRET"),
 			Issuer: getEnv("JWT_ISSUER", "bili-support"),
 			TTL:    getEnv("JWT_TTL", "2h"),
+		},
+		AppealConfirmation: AppealConfirmationConfig{
+			KeyBase64: os.Getenv("APPEAL_CONFIRMATION_KEY_BASE64"),
+			Issuer: getEnv(
+				"APPEAL_CONFIRMATION_ISSUER",
+				"video-support-agent-appeal",
+			),
+			Audience: getEnv(
+				"APPEAL_CONFIRMATION_AUDIENCE",
+				"video-support-agent-appeal-create",
+			),
 		},
 		LLM: LLMConfig{
 			BaseURL: getEnv("LLM_BASE_URL", ""),

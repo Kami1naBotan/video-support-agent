@@ -15,10 +15,15 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import ChatView from './ChatView.vue'
 import { useAuthStore } from '../stores/auth'
 import { listConversationsAPI } from '../api/conversation'
-import { listMessagesAPI } from '../api/message'
+import { listMessagesAPI, recoverAgentRunAPI } from '../api/message'
 import type { ChatMessage } from '../api/message'
-import { streamMessageAPI } from '../api/chat-stream'
+import { streamAgentMessageAPI } from '../api/chat-stream'
 import type { StreamDoneData } from '../api/chat-stream'
+import {
+    uiDone,
+    uiRecovery,
+    withAgentHistory,
+} from '../test/agent-ui-fixtures'
 
 vi.mock('vue-router', () => ({
     useRouter: () => ({
@@ -33,10 +38,11 @@ vi.mock('../api/conversation', () => ({
 
 vi.mock('../api/message', () => ({
     listMessagesAPI: vi.fn(),
+    recoverAgentRunAPI: vi.fn(),
 }))
 
 vi.mock('../api/chat-stream', () => ({
-    streamMessageAPI: vi.fn(),
+    streamAgentMessageAPI: vi.fn(),
 }))
 
 function deferred<T>() {
@@ -55,6 +61,7 @@ let wrapper: VueWrapper | undefined
 
 beforeEach(() => {
     vi.resetAllMocks()
+    vi.mocked(recoverAgentRunAPI).mockResolvedValue(uiRecovery())
     sessionStorage.clear()
 
     vi.mocked(listConversationsAPI).mockResolvedValue([
@@ -115,7 +122,7 @@ async function submitQuestion(page: VueWrapper, question: string) {
 }
 
 function streamOptions(index: number) {
-    const call = vi.mocked(streamMessageAPI).mock.calls[index]
+    const call = vi.mocked(streamAgentMessageAPI).mock.calls[index]
     if (!call) {
         throw new Error(`缺少第 ${index + 1} 次流式请求`)
     }
@@ -134,7 +141,7 @@ describe('ChatView recovery and unmount', () => {
         const secondStream = deferred<StreamDoneData>()
         const refreshedHistory = deferred<ChatMessage[]>()
 
-        vi.mocked(streamMessageAPI)
+        vi.mocked(streamAgentMessageAPI)
             .mockReturnValueOnce(firstStream.promise)
             .mockReturnValueOnce(secondStream.promise)
 
@@ -161,10 +168,8 @@ describe('ChatView recovery and unmount', () => {
             data: { content: '已经完整生成的回答' },
         })
 
-        const done: StreamDoneData = {
-            user_message_id: 10,
-            assistant_message_id: 11,
-        }
+        const done: StreamDoneData = uiDone()
+
         options.onEvent({ event: 'done', data: done })
         firstStream.resolve(done)
 
@@ -172,7 +177,7 @@ describe('ChatView recovery and unmount', () => {
         await nextTick()
 
         expect(listMessagesAPI).toHaveBeenCalledTimes(2)
-        expect(page.text()).toContain('加载消息失败')
+        expect(page.text()).toContain('历史与恢复结果尚未核对完成')
         expect(page.text()).toContain('回答已完成并保存')
         expect(page.text()).not.toContain('本轮回答未确认完成')
         expect(displayedContents(page)).toEqual([
@@ -185,13 +190,23 @@ describe('ChatView recovery and unmount', () => {
         )
         expect(sendButton.classes()).not.toContain('is-loading')
 
-        // 历史未同步时，输入可以保留，但不能直接提交新一轮。
-        await submitQuestion(page, '第二个问题')
+        // 历史未同步时输入框禁用，直接触发表单也不能发起新请求。
+        expect(
+            page.get<HTMLTextAreaElement>(
+                '.conversation-panel textarea',
+            ).element.disabled,
+        ).toBe(true)
 
-        expect(streamMessageAPI).toHaveBeenCalledTimes(1)
-        expect(warningToast).toHaveBeenCalledWith(
-            '请先刷新消息确认上一轮结果，再发送新消息',
-        )
+        await page.get('.conversation-panel form').trigger('submit')
+        await flushPromises()
+
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
+        expect(warningToast).not.toHaveBeenCalled()
+        expect(
+            page.get<HTMLButtonElement>(
+                '.send-actions button[type="submit"]',
+            ).element.disabled,
+        ).toBe(true)
         expect(errorToast).not.toHaveBeenCalled()
 
         const refreshButton = page
@@ -215,7 +230,7 @@ describe('ChatView recovery and unmount', () => {
             '已经完整生成的回答',
         ])
 
-        refreshedHistory.resolve([
+        refreshedHistory.resolve(withAgentHistory([
             {
                 id: 10,
                 conversation_id: 1,
@@ -230,12 +245,12 @@ describe('ChatView recovery and unmount', () => {
                 content: '已经完整生成的回答',
                 created_at: '2026-10-21T00:00:01Z',
             },
-        ])
+        ]))
 
         await flushPromises()
         await nextTick()
 
-        expect(page.text()).not.toContain('加载消息失败')
+        expect(page.text()).not.toContain('历史与恢复结果尚未核对完成')
         expect(page.text()).not.toContain('正在加载消息')
         expect(page.text()).toContain('回答已完成并保存')
         expect(displayedContents(page)).toEqual([
@@ -243,22 +258,38 @@ describe('ChatView recovery and unmount', () => {
             '已经完整生成的回答',
         ])
         expect(page.findAll('.message-item')).toHaveLength(2)
-        expect(page.find('.message-list .stream-status').exists()).toBe(false)
+        // 临时流状态已移除，历史消息的持久化状态摘要仍保留。
+        expect(
+            page.find('.message-list .stream-status[role="status"]').exists(),
+        ).toBe(false)
+
+        const savedStatus = page.findAll('.message-list .stream-status')
+        expect(savedStatus).toHaveLength(1)
+        expect(savedStatus[0]!.text()).toContain('此轮记录：未报告工单提交')
+        expect(savedStatus[0]!.text()).toContain('消息已保存')
 
         const input = page.get<HTMLTextAreaElement>(
             '.conversation-panel textarea',
         )
-        expect(input.element.value).toBe('第二个问题')
+        expect(input.element.value).toBe('')
         expect(input.element.disabled).toBe(false)
 
-        // 刷新成功后，新一轮提交恢复正常。
+        // 恢复成功后，用户可以重新输入并提交新一轮。
+        await input.setValue('第二个问题')
+        expect(input.element.value).toBe('第二个问题')
+        expect(
+            page.get<HTMLButtonElement>(
+                '.send-actions button[type="submit"]',
+            ).element.disabled,
+        ).toBe(false)
+
         await page.get('.conversation-panel form').trigger('submit')
         await flushPromises()
 
-        expect(streamMessageAPI).toHaveBeenCalledTimes(2)
-        expect(vi.mocked(streamMessageAPI).mock.calls[1]?.[1]).toBe(
-            '第二个问题',
-        )
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(streamAgentMessageAPI).mock.calls[1]?.[1]).toEqual({
+            content: '第二个问题',
+        })
 
         // 结束测试中尚未完成的第二轮，避免留下悬而未决的请求。
         const secondOptions = streamOptions(1)
@@ -272,7 +303,7 @@ describe('ChatView recovery and unmount', () => {
 
     it('aborts an active stream on unmount and ignores its late completion', async () => {
         const pending = deferred<StreamDoneData>()
-        vi.mocked(streamMessageAPI).mockReturnValue(pending.promise)
+        vi.mocked(streamAgentMessageAPI).mockReturnValue(pending.promise)
 
         const errorToast = vi.spyOn(ElMessage, 'error')
             .mockImplementation(() => ({ close: () => {} }))
@@ -319,7 +350,7 @@ describe('ChatView recovery and unmount', () => {
 
         expect(document.querySelector('.chat-page')).toBeNull()
         expect(listMessagesAPI).toHaveBeenCalledTimes(1)
-        expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
         expect(errorToast).not.toHaveBeenCalled()
     })
 
@@ -352,6 +383,6 @@ describe('ChatView recovery and unmount', () => {
 
         expect(document.querySelector('.chat-page')).toBeNull()
         expect(errorToast).not.toHaveBeenCalled()
-        expect(streamMessageAPI).not.toHaveBeenCalled()
+        expect(streamAgentMessageAPI).not.toHaveBeenCalled()
     })
 })

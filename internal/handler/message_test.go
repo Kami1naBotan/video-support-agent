@@ -320,7 +320,7 @@ func TestMessageHandlerAccessDenied(t *testing.T) {
 						method,
 						"/api/v1/conversations/1/messages?user_id=8",
 						strings.NewReader(
-							`{"content":"测试","user_id":8}`,
+							`{"content":"测试"}`,
 						),
 					)
 					request.Header.Set("Content-Type", "application/json")

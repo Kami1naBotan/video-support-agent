@@ -1,6 +1,15 @@
 import type { ChatStreamEvent } from './chat-stream'
 import type { SSEFrame } from './sse-parser'
 import { decodeRuleCitations } from './rule-citation'
+import {
+    decodeActionRequired,
+    decodeAgentDone,
+    decodeAgentError,
+    decodeAgentResult,
+    decodeMessageReceipt,
+    decodeToolEvent,
+    uuidValue,
+} from './agent-protocol'
 
 function isObject(
     value: unknown,
@@ -63,37 +72,56 @@ export function decodeChatStreamEvent(
             }
 
         case 'error':
-            if (
-                typeof data.code !== 'string' ||
-                data.code.trim() === '' ||
-                typeof data.message !== 'string' ||
-                data.message.trim() === ''
-            ) {
-                throw new Error('error 事件缺少有效错误码或提示')
-            }
-
             return {
                 event: 'error',
-                data: {
-                    code: data.code,
-                    message: data.message,
-                },
+                data: decodeAgentError(data),
             }
 
         case 'done':
             if (
-                !isPositiveID(data.user_message_id) ||
-                !isPositiveID(data.assistant_message_id)
+                data.run_id !== undefined ||
+                data.agent !== undefined ||
+                data.message_save_status !== undefined
             ) {
-                throw new Error('done 事件的消息 ID 无效')
+                return {
+                    event: 'done',
+                    data: decodeAgentDone(data),
+                }
             }
 
             return {
                 event: 'done',
-                data: {
-                    user_message_id: data.user_message_id,
-                    assistant_message_id: data.assistant_message_id,
-                },
+                data: decodeMessageReceipt(data),
+            }
+
+        case 'agent_start':
+            return {
+                event: 'agent_start',
+                data: { run_id: uuidValue(data.run_id) },
+            }
+
+        case 'tool_start':
+            return {
+                event: 'tool_start',
+                data: decodeToolEvent(data, false),
+            }
+
+        case 'tool_end':
+            return {
+                event: 'tool_end',
+                data: decodeToolEvent(data, true),
+            }
+
+        case 'action_required':
+            return {
+                event: 'action_required',
+                data: decodeActionRequired(data),
+            }
+
+        case 'agent_result':
+            return {
+                event: 'agent_result',
+                data: decodeAgentResult(data),
             }
 
         default:

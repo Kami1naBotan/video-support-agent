@@ -24,9 +24,19 @@ func (h *MessageHandler) CreateStream(c *gin.Context) {
 		return
 	}
 
-	var request createMessageRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
+	request, err := decodeMessageRequest(c)
+	if err != nil {
 		writeBindError(c, err)
+		return
+	}
+
+	if h.agent {
+		h.createAgentStream(c, userID, conversationID, request)
+		return
+	}
+
+	if request.Confirmed != nil {
+		writeError(c, service.ErrAgentAuditConfiguration)
 		return
 	}
 

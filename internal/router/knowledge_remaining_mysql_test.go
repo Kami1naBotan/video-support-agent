@@ -263,7 +263,13 @@ func TestKnowledgeRemainingMySQLLegacyMigration(t *testing.T) {
 	prefix := "km_" + hex.EncodeToString(random[:]) + "_"
 
 	// 顺序同时作为删除夹具表的外键依赖顺序。
+	// 子表先删除；同时作为完整夹具所有权清单。
 	tableNames := []string{
+		"tool_calls",
+		"ticket_records",
+		"messages",
+		"agent_runs",
+		"appeal_tickets",
 		"rule_operations",
 		"rule_verifications",
 		"knowledge_chunks",
@@ -271,11 +277,15 @@ func TestKnowledgeRemainingMySQLLegacyMigration(t *testing.T) {
 		"rule_versions",
 		"knowledge_documents",
 		"rule_categories",
-		"messages",
 		"conversations",
 		"users",
 	}
 	models := []any{
+		&model.ToolCall{},
+		&model.TicketRecord{},
+		&model.Message{},
+		&model.AgentRun{},
+		&model.AppealTicket{},
 		&model.RuleOperation{},
 		&model.RuleVerification{},
 		&model.KnowledgeChunk{},
@@ -283,7 +293,6 @@ func TestKnowledgeRemainingMySQLLegacyMigration(t *testing.T) {
 		&model.RuleVersion{},
 		&model.KnowledgeDocument{},
 		&model.RuleCategory{},
-		&model.Message{},
 		&model.Conversation{},
 		&model.User{},
 	}
@@ -431,10 +440,16 @@ func TestKnowledgeRemainingMySQLLegacyMigration(t *testing.T) {
 	readOldData := func() map[string][]map[string]any {
 		t.Helper()
 		data := make(map[string][]map[string]any)
-		for _, name := range tableNames {
-			if name == "rule_verifications" || name == "rule_operations" {
-				continue
-			}
+		for _, name := range []string{
+			"users",
+			"conversations",
+			"messages",
+			"rule_categories",
+			"knowledge_documents",
+			"rule_versions",
+			"rule_articles",
+			"knowledge_chunks",
+		} {
 			var rows []map[string]any
 			Must(t, isolated.Table(prefix+name).
 				Order("id ASC").Find(&rows).Error)
@@ -458,6 +473,18 @@ func TestKnowledgeRemainingMySQLLegacyMigration(t *testing.T) {
 	assertMigrated := func() {
 		t.Helper()
 		Equal(t, readOldData(), before)
+
+		// 升级不能凭空生成工单或 Agent 审计记录。
+		for _, name := range []string{
+			"appeal_tickets",
+			"ticket_records",
+			"agent_runs",
+			"tool_calls",
+		} {
+			var count int64
+			Must(t, isolated.Table(prefix+name).Count(&count).Error)
+			Equal(t, count, int64(0))
+		}
 
 		var saved model.RuleVersion
 		Must(t, isolated.First(&saved, version.ID).Error)

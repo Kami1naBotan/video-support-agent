@@ -19,6 +19,10 @@ type ErrorResponse struct {
 }
 
 func classifyResponseError(err error) (int, ErrorResponse) {
+	if status, response, handled := classifyAgentResponseError(err); handled {
+		return status, response
+	}
+
 	status := http.StatusInternalServerError
 	code := "internal_error"
 	message := "internal server error"

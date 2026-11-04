@@ -15,9 +15,10 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import ChatView from './ChatView.vue'
 import { useAuthStore } from '../stores/auth'
 import { listConversationsAPI } from '../api/conversation'
-import { listMessagesAPI } from '../api/message'
-import { streamMessageAPI } from '../api/chat-stream'
+import { listMessagesAPI, recoverAgentRunAPI } from '../api/message'
+import { streamAgentMessageAPI } from '../api/chat-stream'
 import type { StreamDoneData } from '../api/chat-stream'
+import { uiDone, uiRecovery } from '../test/agent-ui-fixtures'
 
 vi.mock('vue-router', () => ({
     useRouter: () => ({
@@ -32,10 +33,11 @@ vi.mock('../api/conversation', () => ({
 
 vi.mock('../api/message', () => ({
     listMessagesAPI: vi.fn(),
+    recoverAgentRunAPI: vi.fn(),
 }))
 
 vi.mock('../api/chat-stream', () => ({
-    streamMessageAPI: vi.fn(),
+    streamAgentMessageAPI: vi.fn(),
 }))
 
 function deferred<T>() {
@@ -54,6 +56,7 @@ let wrapper: VueWrapper | undefined
 
 beforeEach(() => {
     vi.resetAllMocks()
+    vi.mocked(recoverAgentRunAPI).mockResolvedValue(uiRecovery())
     sessionStorage.clear()
 
     vi.mocked(listConversationsAPI).mockResolvedValue([
@@ -121,7 +124,7 @@ async function submitQuestion(page: VueWrapper, question: string) {
 }
 
 function streamOptions(index: number) {
-    const call = vi.mocked(streamMessageAPI).mock.calls[index]
+    const call = vi.mocked(streamAgentMessageAPI).mock.calls[index]
     if (!call) {
         throw new Error(`缺少第 ${index + 1} 次流式请求`)
     }
@@ -149,7 +152,7 @@ describe('ChatView stream cancellation', () => {
     it('aborts on stop, preserves partial text and finishes loading without retry', async () => {
         const pending = deferred<StreamDoneData>()
 
-        vi.mocked(streamMessageAPI).mockReturnValue(pending.promise)
+        vi.mocked(streamAgentMessageAPI).mockReturnValue(pending.promise)
 
         const errorToast = vi.spyOn(ElMessage, 'error')
             .mockImplementation(() => ({ close: () => {} }))
@@ -157,7 +160,7 @@ describe('ChatView stream cancellation', () => {
         const page = await mountChatPage()
         await submitQuestion(page, '问题 A')
 
-        expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
         const options = streamOptions(0)
 
         options.onEvent({
@@ -209,7 +212,7 @@ describe('ChatView stream cancellation', () => {
             page.get<HTMLTextAreaElement>(
                 '.conversation-panel textarea',
             ).element.disabled,
-        ).toBe(false)
+        ).toBe(true)
 
         expect(page.text()).toContain('已停止接收')
         expect(page.text()).not.toContain('本轮回答未确认完成')
@@ -220,17 +223,21 @@ describe('ChatView stream cancellation', () => {
         ])
 
         expect(errorToast).not.toHaveBeenCalled()
-        expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
 
-        // 停止后没有自动查询历史，也没有重新提交问题。
-        expect(listMessagesAPI).toHaveBeenCalledTimes(1)
+        // 未取得 Run 时仍查询历史，但不自动重新提交。
+        // 无法精确恢复的状态继续阻止新一轮操作。
+        expect(listMessagesAPI).toHaveBeenCalledTimes(2)
+        expect(recoverAgentRunAPI).not.toHaveBeenCalled()
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
+        expect(page.text()).toContain('尚未取得执行标识')
     })
 
     it('ignores old callbacks and cleanup after switching to a new stream', async () => {
         const oldStream = deferred<StreamDoneData>()
         const newStream = deferred<StreamDoneData>()
 
-        vi.mocked(streamMessageAPI)
+        vi.mocked(streamAgentMessageAPI)
             .mockReturnValueOnce(oldStream.promise)
             .mockReturnValueOnce(newStream.promise)
 
@@ -266,8 +273,8 @@ describe('ChatView stream cancellation', () => {
 
         await submitQuestion(page, '问题 B')
 
-        expect(streamMessageAPI).toHaveBeenCalledTimes(2)
-        expect(vi.mocked(streamMessageAPI).mock.calls[1]?.[0]).toBe(2)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(2)
+        expect(vi.mocked(streamAgentMessageAPI).mock.calls[1]?.[0]).toBe(2)
 
         const newOptions = streamOptions(1)
         expect(newOptions.signal.aborted).toBe(false)
@@ -288,10 +295,7 @@ describe('ChatView stream cancellation', () => {
             data: { content: '会话 A 的迟到文字' },
         })
 
-        const oldDone: StreamDoneData = {
-            user_message_id: 10,
-            assistant_message_id: 11,
-        }
+        const oldDone: StreamDoneData = uiDone()
         oldOptions.onEvent({
             event: 'done',
             data: oldDone,
@@ -344,6 +348,6 @@ describe('ChatView stream cancellation', () => {
 
         expect(sendButton.classes()).not.toContain('is-loading')
         expect(page.text()).toContain('已停止接收')
-        expect(streamMessageAPI).toHaveBeenCalledTimes(2)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(2)
     })
 })

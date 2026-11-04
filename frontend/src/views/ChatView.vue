@@ -15,8 +15,11 @@ import {
   listConversationsAPI,
 } from '../api/conversation'
 import type { Conversation } from '../api/conversation'
-import { listMessagesAPI } from '../api/message'
-import { streamMessageAPI } from '../api/chat-stream'
+import {
+  listMessagesAPI,
+  recoverAgentRunAPI,
+} from '../api/message'
+import { streamAgentMessageAPI } from '../api/chat-stream'
 import type { ChatMessage } from '../api/message'
 import {
   errorMessage,
@@ -27,9 +30,34 @@ import {
 import RuleCitations from '../components/RuleCitations.vue'
 import type { RuleCitation } from '../api/rule-citation'
 
+import AgentPanel from '../components/AgentPanel.vue'
+import { ChatStreamRequestError } from '../api/chat-stream-error'
+import type { AgentMessageRequest } from '../api/agent-protocol'
+import {
+  applyAgentError,
+  applyAgentEvent,
+  beginConfirmation,
+  blocksNewMessage,
+  createAgentState,
+  dismissConfirmation,
+  finishAgentStream,
+  interruptAgentStream,
+  applyAgentRecovery,
+  type AgentUIState,
+} from '../chat/agent-state'
+
+import {
+  readRecoveryCheckpoint,
+  writeRecoveryCheckpoint,
+} from '../chat/recovery-checkpoint'
+
 const router = useRouter()
 const auth = useAuthStore()
 const pageRevision = auth.revision
+
+const pageUserID = auth.user?.id ?? 0
+const historyReady = ref(false)
+const recoveryNotice = ref('')
 
 const conversations = ref<Conversation[]>([])
 const selectedID = ref<number | null>(null)
@@ -62,6 +90,17 @@ interface StreamTurn {
 }
 
 const streamTurn = ref<StreamTurn | null>(null)
+const agentStates = ref<Record<number, AgentUIState>>({})
+
+const currentAgent = computed(() => {
+  const id = selectedID.value
+  return id === null ? undefined : agentStates.value[id]
+})
+
+const agentBlocksSending = computed(() => {
+  const state = currentAgent.value
+  return state !== undefined && blocksNewMessage(state)
+})
 
 const completionNotice = ref('')
 
@@ -94,7 +133,12 @@ const selectedConversation = computed(() =>
 )
 
 function isCurrentPage(): boolean {
-  return !disposed && auth.revision === pageRevision
+  return (
+      !disposed &&
+      pageUserID > 0 &&
+      auth.revision === pageRevision &&
+      auth.user?.id === pageUserID
+  )
 }
 
 function newController(): AbortController {
@@ -118,6 +162,13 @@ function stopPage() {
   controllers.clear()
   messageController = null
   streamController = null
+  agentStates.value = {}
+  drafts.clear()
+  draft.value = ''
+  messages.value = []
+  streamTurn.value = null
+  historyReady.value = false
+  recoveryNotice.value = ''
 }
 
 async function handleRequestError(
@@ -226,14 +277,16 @@ async function createConversation() {
 }
 
 async function loadMessages() {
-  if (!isCurrentPage()) return
+  if (!isCurrentPage() || currentAgent.value?.busy) return
 
   messageController?.abort()
 
   const requestID = ++messageRequestID
   const conversationID = selectedID.value
 
+  historyReady.value = false
   messageError.value = ''
+  recoveryNotice.value = ''
 
   if (conversationID === null) {
     messages.value = []
@@ -255,7 +308,87 @@ async function loadMessages() {
     )
   }
 
+  async function recoverState(state: AgentUIState): Promise<void> {
+    const runID = state.runID
+
+    if (runID === undefined) {
+      state.interrupted = true
+      state.recoveryResolved = false
+      recoveryNotice.value =
+          '请求可能已经发送，但尚未取得执行标识。现有接口无法精确恢复这次请求，请先人工核对，不要重复提交。'
+      return
+    }
+
+    try {
+      const recovery = await recoverAgentRunAPI(
+          conversationID!,
+          runID,
+          controller.signal,
+      )
+
+      if (!isCurrentRequest()) return
+
+      applyAgentRecovery(state, recovery, true)
+
+      recoveryNotice.value = state.recoveryResolved
+          ? '已完成本次执行的恢复核对'
+          : '执行、审计或消息保存仍待核对，请稍后再次刷新'
+    } catch (error) {
+      if (!isCurrentRequest()) return
+
+      state.interrupted = true
+      state.recoveryResolved = false
+
+      if (
+          error instanceof ChatStreamRequestError &&
+          error.details?.recovery !== undefined
+      ) {
+        applyAgentRecovery(
+            state,
+            error.details.recovery,
+            false,
+        )
+      }
+
+      const text = await handleRequestError(
+          error,
+          '暂时无法完成恢复查询',
+      )
+
+      if (text !== null && isCurrentRequest()) {
+        recoveryNotice.value =
+            `${text}。已保留现有结果，不会自动重新提交。`
+      }
+    }
+  }
+
   try {
+    let state = agentStates.value[conversationID]
+
+    if (state === undefined) {
+      const checkpoint = readRecoveryCheckpoint(
+          pageUserID,
+          conversationID,
+      )
+
+      if (checkpoint !== undefined) {
+        agentStates.value[conversationID] = createAgentState()
+        state = agentStates.value[conversationID]
+
+        if (state !== undefined) {
+          state.busy = false
+          state.interrupted = true
+          state.runID = checkpoint.run_id
+        }
+      }
+    }
+
+    // 已有定位信息时，先恢复，再读取历史。
+    if (state !== undefined) {
+      await recoverState(state)
+      if (!isCurrentRequest()) return
+    }
+
     const result = await listMessagesAPI(
         conversationID,
         controller.signal,
@@ -265,19 +398,89 @@ async function loadMessages() {
 
     messages.value = result
 
+    // 没有本地定位信息时，可从本人历史找到最近的 Run。
+    // 只恢复状态，不从历史构造确认请求。
+    if (state === undefined) {
+      let latest: ChatMessage | undefined
+
+      for (const message of result) {
+        if (
+            message.agent !== undefined &&
+            (latest === undefined || message.id > latest.id)
+        ) {
+          latest = message
+        }
+      }
+
+      if (latest?.agent !== undefined) {
+        agentStates.value[conversationID] = createAgentState()
+        state = agentStates.value[conversationID]
+
+        if (state !== undefined) {
+          state.busy = false
+          state.interrupted = true
+          state.runID = latest.agent.run_id
+
+          await recoverState(state)
+          if (!isCurrentRequest()) return
+        }
+      }
+    }
+
+    let receiptInHistory = false
+
+    if (state?.receipt !== undefined) {
+      const receipt = state.receipt
+
+      const userMessage = result.find(
+          (message) =>
+              message.id === receipt.user_message_id &&
+              message.role === 'user' &&
+              (
+                  state.runID === undefined ||
+                  message.agent_run_id === state.runID
+              ),
+      )
+
+      const assistantMessage = result.find(
+          (message) =>
+              message.id === receipt.assistant_message_id &&
+              message.role === 'assistant' &&
+              (
+                  state.runID === undefined ||
+                  message.agent_run_id === state.runID
+              ),
+      )
+
+      receiptInHistory =
+          userMessage !== undefined &&
+          assistantMessage !== undefined
+
+      if (!receiptInHistory) {
+        state.interrupted = true
+        state.recoveryResolved = false
+        throw new Error('保存回执与当前历史消息尚未对应')
+      }
+    }
+
     if (
         currentStream.value !== null &&
         (
-            !sending.value ||
-            currentStream.value.status === 'completed'
+            receiptInHistory ||
+            state?.recoveryResolved === true
         )
     ) {
       streamTurn.value = null
     }
+
+    historyReady.value = true
   } catch (error) {
     if (!isCurrentRequest()) return
 
-    const text = await handleRequestError(error, '加载消息失败')
+    const text = await handleRequestError(
+        error,
+        '历史与恢复结果尚未核对完成，请再次刷新',
+    )
 
     if (text !== null && isCurrentRequest()) {
       messageError.value = text
@@ -302,13 +505,19 @@ async function sendMessage() {
   if (
       !isCurrentPage() ||
       conversationID === null ||
+      !historyReady.value ||
       sending.value ||
       loadingMessages.value
   ) {
     return
   }
 
-  // 上一轮展示尚未与历史记录同步，先确认服务端结果。
+  const previous = agentStates.value[conversationID]
+  if (previous !== undefined && blocksNewMessage(previous)) {
+    ElMessage.warning('请先处理确认卡片或核对上一轮执行结果')
+    return
+  }
+
   if (currentStream.value !== null) {
     ElMessage.warning('请先刷新消息确认上一轮结果，再发送新消息')
     return
@@ -319,6 +528,105 @@ async function sendMessage() {
     return
   }
 
+  try {
+    writeRecoveryCheckpoint(pageUserID, conversationID)
+  } catch {
+    ElMessage.error('无法保存恢复定位信息，本次消息尚未发送')
+    return
+  }
+
+  agentStates.value[conversationID] = createAgentState()
+  const state = agentStates.value[conversationID]
+  if (state === undefined) return
+
+  await runAgentMessage(
+      conversationID,
+      { content },
+      content,
+      state,
+      true,
+  )
+}
+
+async function confirmCurrentAction() {
+  const conversationID = selectedID.value
+  const previous = currentAgent.value
+
+  if (
+      !isCurrentPage() ||
+      conversationID === null ||
+      !historyReady.value ||
+      previous === undefined ||
+      sending.value ||
+      loadingMessages.value
+  ) {
+    return
+  }
+
+  const previousPhase = previous.operation?.phase
+  const confirmed = beginConfirmation(previous)
+  if (confirmed === null) {
+    ElMessage.warning('当前确认尚不可提交，请检查有效期与执行状态')
+    return
+  }
+
+  try {
+    writeRecoveryCheckpoint(
+        pageUserID,
+        conversationID,
+        undefined,
+        confirmed.idempotency_key,
+    )
+  } catch {
+    if (
+        previous.operation !== undefined &&
+        previousPhase !== undefined
+    ) {
+      previous.operation.phase = previousPhase
+    }
+
+    ElMessage.error('无法保存恢复定位信息，本次确认尚未发送')
+    return
+  }
+
+  // 新确认执行使用新的 Run 状态，但沿用原确认操作与原 Key。
+  agentStates.value[conversationID] = createAgentState(previous.operation)
+  const state = agentStates.value[conversationID]
+  if (state === undefined) return
+
+  await runAgentMessage(
+      conversationID,
+      { confirmed_action: confirmed },
+      confirmed.intake_mode === 'manual_review'
+          ? '确认提交本地人工复核申请'
+          : '确认创建本地工单',
+      state,
+      false,
+  )
+}
+
+function dismissCurrentAction() {
+  if (
+      !isCurrentPage() ||
+      sending.value ||
+      loadingMessages.value
+  ) {
+    return
+  }
+
+  const state = currentAgent.value
+  if (state !== undefined) {
+    dismissConfirmation(state)
+  }
+}
+
+async function runAgentMessage(
+    conversationID: number,
+    request: AgentMessageRequest,
+    question: string,
+    state: AgentUIState,
+    clearDraft: boolean,
+) {
   const controller = newController()
   streamController = controller
   sending.value = true
@@ -327,14 +635,13 @@ async function sendMessage() {
 
   streamTurn.value = {
     conversationID,
-    question: content,
+    question,
     answer: '',
     citations: [],
     status: 'waiting',
     error: '',
   }
 
-  // 从 ref 中取出 Vue 的响应式对象，后续更新才能驱动页面。
   const turn = streamTurn.value
 
   function isCurrentStream(): boolean {
@@ -342,16 +649,44 @@ async function sendMessage() {
         isCurrentPage() &&
         streamController === controller &&
         selectedID.value === conversationID &&
-        streamTurn.value === turn
+        streamTurn.value === turn &&
+        agentStates.value[conversationID] === state
     )
   }
 
+  let persistedRunID: string | undefined
+
+  function persistRunID() {
+    if (
+        state.runID === undefined ||
+        state.runID === persistedRunID
+    ) {
+      return
+    }
+
+    writeRecoveryCheckpoint(
+        pageUserID,
+        conversationID,
+        state.runID,
+        request.confirmed_action?.idempotency_key,
+    )
+
+    persistedRunID = state.runID
+  }
+
   try {
-    await streamMessageAPI(conversationID, content, {
+    await streamAgentMessageAPI(conversationID, request, {
       signal: controller.signal,
 
       onEvent(event) {
         if (!isCurrentStream() || controller.signal.aborted) return
+
+        try {
+          applyAgentEvent(state, event)
+        } finally {
+          // 即使后续工具状态校验失败，也保留已取得的 Run ID。
+          persistRunID()
+        }
 
         switch (event.event) {
           case 'start':
@@ -366,12 +701,13 @@ async function sendMessage() {
             turn.citations = event.data.items
             break
 
+          case 'agent_start':
+          case 'tool_start':
+          case 'tool_end':
+          case 'action_required':
+          case 'agent_result':
           case 'error':
-            // 请求层会将它转换为异常，由下面的 catch 统一处理。
-            break
-
           case 'done':
-            // 等请求层完成协议检查并正常返回，再确认完成状态。
             break
         }
       },
@@ -379,15 +715,54 @@ async function sendMessage() {
 
     if (!isCurrentStream()) return
 
+    finishAgentStream(state)
     turn.status = 'completed'
-    completionNotice.value = '回答已完成并保存'
-    drafts.delete(conversationID)
-    draft.value = ''
 
-    // 使用真实历史记录替换临时展示，获得数据库 ID 和时间。
+    completionNotice.value =
+        state.operation?.phase === 'ready'
+            ? '回答已保存，请核对确认卡片'
+            : state.businessEffect === 'committed'
+                ? '已收到工单提交结果，消息已保存'
+                : '回答已完成并保存'
+
+    // 提交确认不会删除用户另行输入的咨询草稿。
+    if (clearDraft) {
+      drafts.delete(conversationID)
+      draft.value = ''
+    }
+
     await loadMessages()
   } catch (error) {
     if (!isCurrentStream()) return
+
+    let displayError: unknown = error
+
+    // 非 2xx HTTP 错误没有经过 onEvent，也要读取其中的业务事实。
+    if (
+        error instanceof ChatStreamRequestError &&
+        error.details !== undefined
+    ) {
+      try {
+        applyAgentError(state, error.details)
+      } catch (protocolError) {
+        displayError = protocolError
+      }
+    }
+
+    try {
+      persistRunID()
+    } catch {
+      recoveryNotice.value =
+          '恢复标识暂时只能保留在当前页面，请保持页面打开并核对结果'
+    }
+
+    interruptAgentStream(state)
+
+    // agent_result 可能已经到达，但 token 尚未发送就断开。
+    if (turn.answer === '' && state.result !== undefined) {
+      turn.answer = state.result.content
+      turn.citations = state.result.citations
+    }
 
     if (isCanceled(error)) {
       turn.status = 'stopped'
@@ -397,24 +772,28 @@ async function sendMessage() {
     turn.status = 'failed'
 
     const text = await handleRequestError(
-        error,
-        '回答连接异常，请刷新消息确认结果',
+        displayError,
+        '回答连接异常，执行结果尚待核对',
     )
 
-    // handleRequestError 内可能发生跳转，因此等待后再检查一次。
     if (text !== null && isCurrentStream()) {
-      turn.error =
-          `${text}。请刷新消息确认保存结果，避免重复发送。`
+      turn.error = `${text}。请先核对恢复结果，不要重复提交。`
     }
   } finally {
     releaseController(controller)
 
-    // 旧请求的 finally 不能清除新请求的控制器和加载状态。
     if (streamController === controller) {
       streamController = null
 
       if (isCurrentPage()) {
         sending.value = false
+
+        if (
+            state.interrupted &&
+            selectedID.value === conversationID
+        ) {
+          void loadMessages()
+        }
       }
     }
   }
@@ -434,6 +813,12 @@ function stopGenerating() {
   }
 
   turn.status = 'stopped'
+
+  const state = currentAgent.value
+  if (state !== undefined && state.busy) {
+    interruptAgentStream(state)
+  }
+
   streamController?.abort()
 }
 
@@ -451,11 +836,20 @@ async function handleLogout() {
 watch(selectedID, (nextID, previousID) => {
   if (!isCurrentPage()) return
 
+  if (previousID !== null) {
+    const previous = agentStates.value[previousID]
+    if (previous !== undefined && previous.busy) {
+      interruptAgentStream(previous)
+    }
+  }
+
   streamController?.abort()
   streamController = null
   sending.value = false
   streamTurn.value = null
   completionNotice.value = ''
+  historyReady.value = false
+  recoveryNotice.value = ''
 
   if (previousID !== null) {
     drafts.set(previousID, draft.value)
@@ -588,6 +982,10 @@ onBeforeUnmount(stopPage)
               {{ completionNotice }}
             </p>
 
+            <p v-if="recoveryNotice" class="stream-status" role="status">
+              {{ recoveryNotice }}
+            </p>
+
             <el-alert
                 v-if="messageError"
                 :title="messageError"
@@ -600,6 +998,13 @@ onBeforeUnmount(stopPage)
                 v-if="!loadingMessages &&!messageError &&messages.length === 0 &&!currentStream"
                 description="还没有消息，发送第一条咨询吧"
                 :image-size="70"
+            />
+            <AgentPanel
+                v-if="currentAgent"
+                :state="currentAgent"
+                :disabled="sending || loadingMessages || !historyReady"
+                @confirm="confirmCurrentAction"
+                @dismiss="dismissCurrentAction"
             />
 
             <ul class="message-list">
@@ -614,6 +1019,24 @@ onBeforeUnmount(stopPage)
                 </div>
 
                 <div class="message-content">{{ message.content }}</div>
+                <p
+                    v-if="message.role === 'assistant' && message.agent"
+                    class="stream-status"
+                >
+                  {{
+                    message.agent.business_effect === 'committed'
+                        ? '此轮记录：工单已提交'
+                        : message.agent.business_effect === 'unknown'
+                            ? '此轮记录：工单提交结果待核对'
+                            : '此轮记录：未报告工单提交'
+                  }}
+                  ·
+                  {{
+                    message.agent.message_save_status === 'saved'
+                        ? '消息已保存'
+                        : '消息保存状态待核对'
+                  }}
+                </p>
                 <RuleCitations
                     v-if="message.role === 'assistant'"
                     :items="message.citations ?? []"
@@ -670,7 +1093,12 @@ onBeforeUnmount(stopPage)
                   type="textarea"
                   :rows="4"
                   placeholder="请输入咨询内容"
-                  :disabled="sending || loadingMessages"
+                  :disabled="
+                     sending ||
+                     loadingMessages ||
+                     !historyReady ||
+                     agentBlocksSending
+                  "
               />
 
               <div class="send-actions">
@@ -678,7 +1106,7 @@ onBeforeUnmount(stopPage)
                     type="primary"
                     native-type="submit"
                     :loading="sending"
-                    :disabled="sending || loadingMessages || !draft.trim()"
+                    :disabled="sending || loadingMessages || agentBlocksSending || !draft.trim()"
                 >
                   发送
                 </el-button>

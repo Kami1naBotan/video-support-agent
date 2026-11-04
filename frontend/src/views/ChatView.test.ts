@@ -15,10 +15,15 @@ import ElementPlus from 'element-plus'
 import ChatView from './ChatView.vue'
 import { useAuthStore } from '../stores/auth'
 import { listConversationsAPI } from '../api/conversation'
-import { listMessagesAPI } from '../api/message'
+import { listMessagesAPI, recoverAgentRunAPI } from '../api/message'
 import type { ChatMessage } from '../api/message'
-import { streamMessageAPI } from '../api/chat-stream'
+import { streamAgentMessageAPI } from '../api/chat-stream'
 import type { StreamDoneData } from '../api/chat-stream'
+import {
+  uiDone,
+  uiRecovery,
+  withAgentHistory,
+} from '../test/agent-ui-fixtures'
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({
@@ -33,10 +38,11 @@ vi.mock('../api/conversation', () => ({
 
 vi.mock('../api/message', () => ({
   listMessagesAPI: vi.fn(),
+  recoverAgentRunAPI: vi.fn(),
 }))
 
 vi.mock('../api/chat-stream', () => ({
-  streamMessageAPI: vi.fn(),
+  streamAgentMessageAPI: vi.fn(),
 }))
 
 function deferred<T>() {
@@ -53,6 +59,7 @@ let wrapper: VueWrapper | undefined
 
 beforeEach(() => {
   vi.resetAllMocks()
+  vi.mocked(recoverAgentRunAPI).mockResolvedValue(uiRecovery())
   sessionStorage.clear()
 })
 
@@ -87,7 +94,7 @@ describe('ChatView streaming', () => {
         .mockResolvedValueOnce([])
         .mockImplementationOnce(() => history.promise)
 
-    vi.mocked(streamMessageAPI).mockImplementation(
+    vi.mocked(streamAgentMessageAPI).mockImplementation(
         () => stream.promise,
     )
 
@@ -127,9 +134,9 @@ describe('ChatView streaming', () => {
     await page.get('.conversation-panel form').trigger('submit')
     await flushPromises()
 
-    expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+    expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
 
-    const call = vi.mocked(streamMessageAPI).mock.calls[0]
+    const call = vi.mocked(streamAgentMessageAPI).mock.calls[0]
     if (!call) {
       throw new Error('页面没有调用流式 API')
     }
@@ -137,7 +144,7 @@ describe('ChatView streaming', () => {
     const [conversationID, submittedContent, options] = call
 
     expect(conversationID).toBe(1)
-    expect(submittedContent).toBe(question)
+    expect(submittedContent).toEqual({ content: question })
     expect(options.signal.aborted).toBe(false)
 
     expect(page.text()).toContain('正在等待服务响应')
@@ -194,11 +201,7 @@ describe('ChatView streaming', () => {
       data: { items: [] },
     })
 
-    const done: StreamDoneData = {
-      user_message_id: 10,
-      assistant_message_id: 11,
-    }
-
+    const done: StreamDoneData = uiDone()
     options.onEvent({
       event: 'done',
       data: done,
@@ -224,7 +227,7 @@ describe('ChatView streaming', () => {
     expect(page.findAll('.message-item')).toHaveLength(2)
     expect(input.element.disabled).toBe(true)
 
-    history.resolve([
+    history.resolve(withAgentHistory([
       {
         id: 10,
         conversation_id: 1,
@@ -239,7 +242,7 @@ describe('ChatView streaming', () => {
         content: answer,
         created_at: '2026-10-21T00:00:01Z',
       },
-    ])
+    ]))
 
     await flushPromises()
     await nextTick()
@@ -252,10 +255,15 @@ describe('ChatView streaming', () => {
     expect(contents).toEqual([question, answer])
     expect(page.findAll('.message-item')).toHaveLength(2)
 
-    // 临时问答内部的状态提示消失，页面级完成提示仍保留。
-    expect(page.find('.message-list .stream-status').exists()).toBe(
-        false,
-    )
+    // 临时流状态已移除，历史消息的持久化状态摘要仍保留。
+    expect(
+        page.find('.message-list .stream-status[role="status"]').exists(),
+    ).toBe(false)
+
+    const savedStatus = page.findAll('.message-list .stream-status')
+    expect(savedStatus).toHaveLength(1)
+    expect(savedStatus[0]!.text()).toContain('此轮记录：未报告工单提交')
+    expect(savedStatus[0]!.text()).toContain('消息已保存')
     expect(page.text()).toContain('回答已完成并保存')
     expect(page.text()).not.toContain('正在加载消息')
     expect(page.text()).not.toContain('正在查阅规则并准备回答')
@@ -269,6 +277,6 @@ describe('ChatView streaming', () => {
     expect(sendButton.element.disabled).toBe(false)
 
     // 仅验证恢复输入能力，不自动发送第二轮。
-    expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+    expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
   })
 })

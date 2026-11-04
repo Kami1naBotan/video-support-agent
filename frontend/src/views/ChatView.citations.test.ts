@@ -8,14 +8,19 @@ import ElementPlus, { ElMessage } from 'element-plus'
 import ChatView from './ChatView.vue'
 import { useAuthStore } from '../stores/auth'
 import { listConversationsAPI } from '../api/conversation'
-import { listMessagesAPI } from '../api/message'
+import { listMessagesAPI, recoverAgentRunAPI } from '../api/message'
 import type { ChatMessage } from '../api/message'
-import { streamMessageAPI } from '../api/chat-stream'
+import { streamAgentMessageAPI } from '../api/chat-stream'
 import type { StreamDoneData } from '../api/chat-stream'
 import { getKnowledgeArticleAPI } from '../api/knowledge-article'
 import type { KnowledgeArticleDetail } from '../api/knowledge-article'
 import { ChatStreamRequestError } from '../api/chat-stream-error'
 import { citation, deferred, message } from '../test/rag-fixtures'
+import {
+    uiDone,
+    uiRecovery,
+    withAgentHistory,
+} from '../test/agent-ui-fixtures'
 
 const { replace } = vi.hoisted(() => ({ replace: vi.fn() }))
 
@@ -28,9 +33,10 @@ vi.mock('../api/conversation', () => ({
 }))
 vi.mock('../api/message', () => ({
     listMessagesAPI: vi.fn(),
+    recoverAgentRunAPI: vi.fn(),
 }))
 vi.mock('../api/chat-stream', () => ({
-    streamMessageAPI: vi.fn(),
+    streamAgentMessageAPI: vi.fn(),
 }))
 vi.mock('../api/knowledge-article', () => ({
     getKnowledgeArticleAPI: vi.fn(),
@@ -40,6 +46,7 @@ let wrapper: VueWrapper | undefined
 
 beforeEach(() => {
     vi.resetAllMocks()
+    vi.mocked(recoverAgentRunAPI).mockResolvedValue(uiRecovery())
     sessionStorage.clear()
 
     vi.spyOn(ElMessage, 'warning').mockImplementation(() => ({
@@ -92,7 +99,7 @@ async function submit(page: VueWrapper) {
 }
 
 function options() {
-    const call = vi.mocked(streamMessageAPI).mock.calls.at(-1)
+    const call = vi.mocked(streamAgentMessageAPI).mock.calls.at(-1)
     if (!call) throw new Error('没有流式请求')
     return call[2]
 }
@@ -103,16 +110,13 @@ function button(page: VueWrapper, label: string) {
     return found
 }
 
-const done: StreamDoneData = {
-    user_message_id: 10,
-    assistant_message_id: 11,
-}
+const done: StreamDoneData = uiDone()
 
 function savedMessages(): ChatMessage[] {
-    return [
+    return withAgentHistory([
         message({ id: 10, role: 'user', content: '虚构问题' }),
         message({ citations: [citation()] }),
-    ]
+    ])
 }
 
 describe('ChatView citations', () => {
@@ -141,13 +145,13 @@ describe('ChatView citations', () => {
             '<em>虚构回答</em> [R1]',
         )
         expect(getKnowledgeArticleAPI).not.toHaveBeenCalled()
-        expect(streamMessageAPI).not.toHaveBeenCalled()
+        expect(streamAgentMessageAPI).not.toHaveBeenCalled()
     })
 
     it('live citations and done', async () => {
         const stream = deferred<StreamDoneData>()
         const history = deferred<ChatMessage[]>()
-        vi.mocked(streamMessageAPI).mockReturnValueOnce(stream.promise)
+        vi.mocked(streamAgentMessageAPI).mockReturnValueOnce(stream.promise)
         vi.mocked(listMessagesAPI)
             .mockResolvedValueOnce([])
             .mockReturnValueOnce(history.promise)
@@ -190,14 +194,22 @@ describe('ChatView citations', () => {
         expect(page.findAll('.message-item')).toHaveLength(2)
         expect(page.findAll('.rule-citations')).toHaveLength(1)
         expect(page.get('.citation-list strong').text()).toBe('[R1] 虚构测试规则1')
-        expect(page.find('.message-list .stream-status').exists()).toBe(false)
+        // 临时流状态已移除，历史消息的持久化状态摘要仍保留。
+        expect(
+            page.find('.message-list .stream-status[role="status"]').exists(),
+        ).toBe(false)
+
+        const savedStatus = page.findAll('.message-list .stream-status')
+        expect(savedStatus).toHaveLength(1)
+        expect(savedStatus[0]!.text()).toContain('此轮记录：未报告工单提交')
+        expect(savedStatus[0]!.text()).toContain('消息已保存')
         expect(page.text()).toContain('回答已完成并保存')
         expect(getKnowledgeArticleAPI).not.toHaveBeenCalled()
     })
 
     it('history recovery', async () => {
         const stream = deferred<StreamDoneData>()
-        vi.mocked(streamMessageAPI).mockReturnValueOnce(stream.promise)
+        vi.mocked(streamAgentMessageAPI).mockReturnValueOnce(stream.promise)
         vi.mocked(listMessagesAPI)
             .mockResolvedValueOnce([])
             .mockRejectedValueOnce(new Error('test-only history failure'))
@@ -219,31 +231,40 @@ describe('ChatView citations', () => {
         stream.resolve(done)
         await flushPromises()
 
-        expect(page.text()).toContain('加载消息失败')
+        expect(page.text()).toContain('历史与恢复结果尚未核对完成')
         expect(page.text()).toContain('回答已完成并保存')
         expect(page.findAll('.rule-citations')).toHaveLength(1)
 
         await submit(page)
-        expect(streamMessageAPI).toHaveBeenCalledTimes(1)
+        expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
 
         await button(page, '刷新消息').trigger('click')
         await flushPromises()
 
         expect(listMessagesAPI).toHaveBeenCalledTimes(3)
-        expect(page.text()).not.toContain('加载消息失败')
+        expect(page.text()).not.toContain('历史与恢复结果尚未核对完成')
         expect(page.findAll('.message-item')).toHaveLength(2)
         expect(page.findAll('.rule-citations')).toHaveLength(1)
         expect(page.get('.citation-list strong').text()).toBe('[R1] 虚构测试规则1')
     })
 
-    it('stale page results', async () => {
-        for (const mode of ['switch', 'unmount', 'auth']) {
+    it.each(['switch', 'unmount', 'auth'] as const)(
+        'stale page results: %s',
+        async (mode) => {
             const stream = deferred<StreamDoneData>()
-            vi.mocked(streamMessageAPI).mockReturnValueOnce(stream.promise)
+            vi.mocked(streamAgentMessageAPI).mockReturnValueOnce(stream.promise)
 
             const { page, auth } = await render()
             await submit(page)
+
+            // 每个场景必须真的发起自己的请求，不能复用上一场景的回调。
+            expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
+            expect(
+                vi.mocked(streamAgentMessageAPI).mock.results[0]?.value,
+            ).toBe(stream.promise)
+
             const callbacks = options()
+            expect(callbacks.signal.aborted).toBe(false)
 
             if (mode === 'switch') {
                 await button(page, '会话 2').trigger('click')
@@ -257,20 +278,24 @@ describe('ChatView citations', () => {
                 await nextTick()
             }
 
-            expect(callbacks.signal.aborted, mode).toBe(true)
+            expect(callbacks.signal.aborted).toBe(true)
             const historyCalls = vi.mocked(listMessagesAPI).mock.calls.length
 
+            // 故意让失效请求继续回调并返回401，验证页面忽略旧身份结果。
             callbacks.onEvent({
                 event: 'citation',
                 data: { items: [citation(2)] },
             })
             callbacks.onEvent({ event: 'done', data: done })
             stream.reject(new ChatStreamRequestError(
-                401, 'unauthorized', 'test-only stale stream 401',
+                401,
+                'unauthorized',
+                'test-only stale stream 401',
             ))
             await flushPromises()
 
             expect(listMessagesAPI).toHaveBeenCalledTimes(historyCalls)
+            expect(streamAgentMessageAPI).toHaveBeenCalledTimes(1)
             expect(replace).not.toHaveBeenCalled()
 
             if (mode !== 'unmount') {
@@ -279,9 +304,12 @@ describe('ChatView citations', () => {
                 page.unmount()
                 wrapper = undefined
             }
-            if (mode === 'auth') expect(auth.token).toBe('new-session')
-        }
-    })
+
+            if (mode === 'auth') {
+                expect(auth.token).toBe('new-session')
+            }
+        },
+    )
 
     it('citation unauthorized', async () => {
         for (const mode of ['current', 'stale']) {

@@ -17,11 +17,15 @@ func NewMessageRepository(db *gorm.DB) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, message *model.Message) error {
+	if message != nil && message.AgentRunID != nil {
+		return fmt.Errorf("agent messages must be saved as a pair")
+	}
+
 	if err := prepareMessageCitations(message); err != nil {
 		return fmt.Errorf("prepare message citations: %w", err)
 	}
 
-	err := r.db.WithContext(ctx).Omit("Conversation").Create(message).Error
+	err := r.db.WithContext(ctx).Omit("Conversation", "AgentRun").Create(message).Error
 	if err != nil {
 		return fmt.Errorf("create message: %w", err)
 	}
@@ -45,6 +49,11 @@ func (r *MessageRepository) CreatePair(ctx context.Context, userMessage *model.M
 		return fmt.Errorf("message pair requires distinct messages")
 	}
 
+	runID, err := messagePairRunID(userMessage, assistantMessage)
+	if err != nil {
+		return err
+	}
+
 	if err := prepareMessageCitations(userMessage); err != nil {
 		return fmt.Errorf("prepare user message citations: %w", err)
 	}
@@ -53,13 +62,25 @@ func (r *MessageRepository) CreatePair(ctx context.Context, userMessage *model.M
 		return fmt.Errorf("prepare assistant message citations: %w", err)
 	}
 
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Omit("Conversation").Create(userMessage).Error; err != nil {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if runID != "" {
+			if err := lockMessageAgentRun(tx, runID, userMessage.ConversationID); err != nil {
+				return err
+			}
+		}
+
+		if err := tx.Omit("Conversation", "AgentRun").Create(userMessage).Error; err != nil {
 			return fmt.Errorf("create user message: %w", err)
 		}
 
-		if err := tx.Omit("Conversation").Create(assistantMessage).Error; err != nil {
+		if err := tx.Omit("Conversation", "AgentRun").Create(assistantMessage).Error; err != nil {
 			return fmt.Errorf("create assistant message: %w", err)
+		}
+
+		if runID != "" {
+			if err := markMessageAgentRunSaved(tx, runID, userMessage.ConversationID); err != nil {
+				return err
+			}
 		}
 
 		return nil

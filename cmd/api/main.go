@@ -11,11 +11,11 @@ import (
 	"time"
 	"video-support-agent/internal/auth"
 	"video-support-agent/internal/cache"
+	"video-support-agent/internal/confirmation"
 	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/embedding"
 	"video-support-agent/internal/llm"
 	"video-support-agent/internal/milvus"
-	"video-support-agent/internal/rag"
 	"video-support-agent/internal/repository"
 	"video-support-agent/internal/retrieval"
 
@@ -43,6 +43,13 @@ func main() {
 
 func run() error {
 	cfg := config.Load()
+
+	appealSigner, err := confirmation.NewAppealSigner(
+		cfg.AppealConfirmation,
+	)
+	if err != nil {
+		return errors.New("initialize appeal confirmation failed; check APPEAL_CONFIRMATION_KEY_BASE64, APPEAL_CONFIRMATION_ISSUER and APPEAL_CONFIRMATION_AUDIENCE")
+	}
 
 	if err := config.ValidateElasticsearchConfig(cfg.Elasticsearch); err != nil {
 		return err
@@ -104,10 +111,7 @@ func run() error {
 
 	searchRepository := repository.NewKnowledgeRepository(db)
 
-	searchService, err := retrieval.NewService(
-		searchClient,
-		searchRepository,
-	)
+	searchService, err := retrieval.NewService(searchClient, searchRepository)
 	if err != nil {
 		return errors.New("initialize retrieval service failed")
 	}
@@ -126,20 +130,12 @@ func run() error {
 	}
 	defer vectorClient.Close()
 
-	vectorSearcher, err := milvus.NewSearcher(
-		embeddingClient,
-		vectorClient,
-		vectorRetrievalTimeout,
-	)
+	vectorSearcher, err := milvus.NewSearcher(embeddingClient, vectorClient, vectorRetrievalTimeout)
 	if err != nil {
 		return errors.New("initialize vector candidate searcher failed")
 	}
 
-	vectorRetriever, err := retrieval.NewMilvusRetriever(
-		vectorSearcher,
-		searchRepository,
-		vectorRetrievalTimeout,
-	)
+	vectorRetriever, err := retrieval.NewMilvusRetriever(vectorSearcher, searchRepository, vectorRetrievalTimeout)
 	if err != nil {
 		return errors.New("initialize vector retriever failed")
 	}
@@ -184,14 +180,9 @@ func run() error {
 		return errors.New("initialize authentication rate limiter failed")
 	}
 
-	modelTimeout, err := time.ParseDuration(cfg.LLM.Timeout)
-	if err != nil || modelTimeout <= 0 || modelTimeout > 30*time.Second {
-		return errors.New("LLM_TIMEOUT must be positive and no greater than 30s")
-	}
-
-	chatModel, err := llm.NewChatModel(context.Background(), cfg.LLM)
+	agentModels, err := llm.NewAgentModels(context.Background(), cfg.LLM)
 	if err != nil {
-		return errors.New("initialize LLM model failed; check LLM configuration")
+		return errors.New("initialize Agent models failed; check LLM_BASE_URL, LLM_MODEL, LLM_API_KEY and LLM_TIMEOUT (0 < timeout <= 30s)")
 	}
 
 	hybridRetriever, err := retrieval.NewHybridService(searchClient, vectorSearcher, searchRepository, nil)
@@ -204,14 +195,14 @@ func run() error {
 		return errors.New("initialize hybrid retrieval logging failed")
 	}
 
-	chatResponder, err := rag.NewResponder(loggedHybrid, chatModel, modelTimeout, appLogger)
+	messageHandler, err := newAgentMessageHandler(db, contextStore, loggedHybrid, agentModels, appealSigner, appLogger)
 	if err != nil {
-		return errors.New("initialize RAG responder failed")
+		return err
 	}
 
-	appLogger.Info("RAG chat dependencies initialized")
+	appLogger.Info("Agent chat dependencies initialized")
 
-	r := router.NewWithRetrievers(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, chatResponder, searchService, vectorRetriever)
+	r := router.NewWithMessageHandler(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, nil, searchService, vectorRetriever, messageHandler)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
 

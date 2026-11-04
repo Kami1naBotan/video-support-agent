@@ -25,6 +25,18 @@ func NewWithRetriever(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager,
 }
 
 func NewWithRetrievers(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever) *gin.Engine {
+	return newRouter(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, vectorRetriever, nil)
+}
+
+func NewWithMessageHandler(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever, messageHandler *handler.MessageHandler) *gin.Engine {
+	if messageHandler == nil {
+		panic("message handler is required")
+	}
+
+	return newRouter(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, vectorRetriever, messageHandler)
+}
+
+func newRouter(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever, messageHandler *handler.MessageHandler) *gin.Engine {
 	r := gin.New()
 
 	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
@@ -57,10 +69,12 @@ func NewWithRetrievers(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager
 	messageRepository := repository.NewMessageRepository(db)
 	conversationService := service.NewConversationService(conversationRepository, userRepository)
 
-	messageService := service.NewMessageService(messageRepository, conversationRepository, contexts, appLogger, chat)
 	conversationHandler := handler.NewConversationHandler(conversationService)
 
-	messageHandler := handler.NewMessageHandler(messageService)
+	if messageHandler == nil {
+		messageService := service.NewMessageService(messageRepository, conversationRepository, contexts, appLogger, chat)
+		messageHandler = handler.NewMessageHandler(messageService)
+	}
 
 	knowledgeRepository := repository.NewKnowledgeRepository(db)
 	knowledgeService := service.NewKnowledgeService(knowledgeRepository)
@@ -116,6 +130,7 @@ func NewWithRetrievers(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager
 	conversations.POST("/:id/messages", messageHandler.Create)
 	conversations.POST("/:id/messages/stream", messageHandler.CreateStream)
 	conversations.GET("/:id/messages", messageHandler.List)
+	conversations.GET("/:id/agent-runs/:run_id", messageHandler.GetAgentRun)
 
 	return r
 }

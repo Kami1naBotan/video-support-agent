@@ -11,7 +11,6 @@ func Migrate(db *gorm.DB) error {
 	err := db.AutoMigrate(
 		&model.User{},
 		&model.Conversation{},
-		&model.Message{},
 
 		&model.KnowledgeDocument{},
 		&model.RuleCategory{},
@@ -20,6 +19,12 @@ func Migrate(db *gorm.DB) error {
 		&model.KnowledgeChunk{},
 		&model.RuleVerification{},
 		&model.RuleOperation{},
+
+		&model.AppealTicket{},
+		&model.TicketRecord{},
+		&model.AgentRun{},
+		&model.Message{},
+		&model.ToolCall{},
 	)
 	if err != nil {
 		return fmt.Errorf("migrate database: %w", err)

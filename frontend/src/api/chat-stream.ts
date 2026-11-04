@@ -1,8 +1,20 @@
 import { readToken } from '../auth/token'
 import { createSSEParser } from './sse-parser'
 import { decodeChatStreamEvent } from './chat-stream-event'
-import { ChatStreamRequestError } from './chat-stream-error'
+import {
+    ChatStreamRequestError,
+    decodeRequestError,
+} from './chat-stream-error'
 import type { RuleCitation } from './rule-citation'
+import {
+    encodeAgentRequest,
+    type ActionRequired,
+    type AgentDoneData,
+    type AgentErrorData,
+    type AgentMessageRequest,
+    type AgentResult,
+    type ToolEventData,
+} from './agent-protocol'
 
 export interface StreamStartData {
     conversation_id: number
@@ -16,15 +28,14 @@ export interface StreamCitationData {
     items: RuleCitation[]
 }
 
-export interface StreamErrorData {
-    code: string
-    message: string
-}
+export type StreamErrorData = AgentErrorData
 
-export interface StreamDoneData {
+export interface LegacyStreamDoneData {
     user_message_id: number
     assistant_message_id: number
 }
+
+export type StreamDoneData = LegacyStreamDoneData | AgentDoneData
 
 export type ChatStreamEvent =
     | { event: 'start'; data: StreamStartData }
@@ -32,6 +43,11 @@ export type ChatStreamEvent =
     | { event: 'citation'; data: StreamCitationData }
     | { event: 'error'; data: StreamErrorData }
     | { event: 'done'; data: StreamDoneData }
+    | { event: 'agent_start'; data: { run_id: string } }
+    | { event: 'tool_start'; data: ToolEventData }
+    | { event: 'tool_end'; data: ToolEventData }
+    | { event: 'action_required'; data: ActionRequired }
+    | { event: 'agent_result'; data: AgentResult }
 
 export interface StreamChatOptions {
     signal: AbortSignal
@@ -41,39 +57,23 @@ export interface StreamChatOptions {
 async function readHTTPError(
     response: Response,
 ): Promise<ChatStreamRequestError> {
-    let code = 'http_error'
-    let message = `请求失败（HTTP ${response.status}）`
-
+    let data: unknown
     try {
-        const data: unknown = await response.json()
-
-        if (
-            typeof data === 'object' &&
-            data !== null &&
-            !Array.isArray(data)
-        ) {
-            const body = data as Record<string, unknown>
-
-            if (typeof body.code === 'string' && body.code.trim() !== '') {
-                code = body.code
-            }
-            if (
-                typeof body.message === 'string' &&
-                body.message.trim() !== ''
-            ) {
-                message = body.message
-            }
-        }
+        data = await response.json()
     } catch {
-        // 例如 Nginx 返回 HTML 错误页，保留通用 HTTP 提示。
+        return new ChatStreamRequestError(
+            response.status,
+            'http_error',
+            `请求失败（HTTP ${response.status}），请先核对已有结果`,
+        )
     }
 
-    return new ChatStreamRequestError(response.status, code, message)
+    return decodeRequestError(response.status, data)
 }
 
-export async function streamMessageAPI(
+export async function streamAgentMessageAPI(
     conversationID: number,
-    content: string,
+    request: AgentMessageRequest,
     options: StreamChatOptions,
 ): Promise<StreamDoneData> {
     if (
@@ -82,6 +82,8 @@ export async function streamMessageAPI(
     ) {
         throw new Error('会话 ID 无效')
     }
+
+    const body = encodeAgentRequest(request)
 
     // 用户取消与请求总超时，任意一个触发都会中止请求。
     const signal = AbortSignal.any([
@@ -106,7 +108,7 @@ export async function streamMessageAPI(
         {
             method: 'POST',
             headers,
-            body: JSON.stringify({ content }),
+            body: JSON.stringify(body),
             signal,
         },
     )
@@ -145,6 +147,74 @@ export async function streamMessageAPI(
         done: null,
     }
 
+    let activeRunID: string | undefined
+    let receivedAgentResult = false
+
+    function checkAgentEvent(event: ChatStreamEvent): void {
+        if (event.event === 'agent_start') {
+            if (activeRunID !== undefined) {
+                throw new Error('重复收到 agent_start')
+            }
+            activeRunID = event.data.run_id
+            return
+        }
+
+        if (
+            event.event === 'tool_start' ||
+            event.event === 'tool_end' ||
+            event.event === 'action_required' ||
+            event.event === 'agent_result'
+        ) {
+            if (
+                activeRunID === undefined ||
+                event.data.run_id !== activeRunID
+            ) {
+                throw new Error('Agent 事件未关联当前 Run')
+            }
+
+            if (receivedAgentResult) {
+                throw new Error('agent_result 后仍收到执行过程事件')
+            }
+            if (event.event === 'agent_result') {
+                receivedAgentResult = true
+            }
+            return
+        }
+
+        if (event.event === 'done') {
+            if ('agent' in event.data) {
+                if (
+                    activeRunID === undefined ||
+                    event.data.run_id !== activeRunID ||
+                    !receivedAgentResult
+                ) {
+                    throw new Error('Agent done 缺少匹配的执行结果')
+                }
+            } else if (activeRunID !== undefined) {
+                throw new Error('Agent 流不能使用旧版 done 收尾')
+            }
+            return
+        }
+
+        if (event.event === 'error') {
+            const ids = [event.data.run_id, event.data.agent?.run_id]
+            for (const id of ids) {
+                if (id !== undefined && id !== activeRunID) {
+                    throw new Error('错误事件未关联当前 Run')
+                }
+            }
+            return
+        }
+
+        if (
+            activeRunID !== undefined &&
+            (event.event === 'token' || event.event === 'citation') &&
+            !receivedAgentResult
+        ) {
+            throw new Error('Agent 输出早于 agent_result')
+        }
+    }
+
     const parser = createSSEParser((frame) => {
         signal.throwIfAborted()
 
@@ -167,6 +237,8 @@ export async function streamMessageAPI(
             throw new Error('重复收到 start 事件')
         }
 
+        checkAgentEvent(event)
+
         if (event.event === 'done') {
             state.terminal = true
             state.done = event.data
@@ -181,6 +253,7 @@ export async function streamMessageAPI(
                 response.status,
                 event.data.code,
                 event.data.message,
+                event.data,
             )
         }
     })
@@ -222,4 +295,16 @@ export async function streamMessageAPI(
             reader.releaseLock()
         }
     }
+}
+
+export async function streamMessageAPI(
+    conversationID: number,
+    content: string,
+    options: StreamChatOptions,
+): Promise<StreamDoneData> {
+    return streamAgentMessageAPI(
+        conversationID,
+        { content },
+        options,
+    )
 }

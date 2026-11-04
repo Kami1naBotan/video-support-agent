@@ -12,16 +12,14 @@ import (
 
 type MessageHandler struct {
 	service *service.MessageService
+	reads   *service.AgentReadService
+	agent   bool
 }
 
 func NewMessageHandler(messageService *service.MessageService) *MessageHandler {
 	return &MessageHandler{
 		service: messageService,
 	}
-}
-
-type createMessageRequest struct {
-	Content string `json:"content"`
 }
 
 func (h *MessageHandler) Create(c *gin.Context) {
@@ -37,18 +35,23 @@ func (h *MessageHandler) Create(c *gin.Context) {
 		return
 	}
 
-	var request createMessageRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
+	request, err := decodeMessageRequest(c)
+	if err != nil {
 		writeBindError(c, err)
 		return
 	}
 
-	message, err := h.service.Create(
-		c.Request.Context(),
-		userID,
-		conversationID,
-		request.Content,
-	)
+	if h.agent {
+		h.createAgent(c, userID, conversationID, request)
+		return
+	}
+
+	if request.Confirmed != nil {
+		writeError(c, service.ErrAgentAuditConfiguration)
+		return
+	}
+
+	message, err := h.service.Create(c.Request.Context(), userID, conversationID, request.Content)
 	if err != nil {
 		writeError(c, err)
 		return
@@ -67,6 +70,21 @@ func (h *MessageHandler) List(c *gin.Context) {
 	conversationID, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil || conversationID == 0 {
 		writeError(c, service.ErrInvalidArgument)
+		return
+	}
+
+	if h.agent {
+		messages, err := h.reads.ListHistory(c.Request.Context(), userID, conversationID)
+		if err != nil {
+			writeError(c, err)
+			return
+		}
+		if messages == nil {
+			messages = []service.MessageHistoryView{}
+		}
+
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, messages)
 		return
 	}
 

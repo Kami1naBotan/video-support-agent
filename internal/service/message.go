@@ -40,6 +40,8 @@ type MessageService struct {
 	streamChat    ChatStreamResponder
 	groundedChat  GroundedChatResponder
 	guard         *ConversationGuard
+	agent         AgentExecutor
+	messageState  AgentMessageStateStore
 }
 
 func NewMessageService(messages MessageStore, conversations ConversationStore, contexts MessageContextStore, logger *zap.Logger, chat ChatResponder) *MessageService {
@@ -74,7 +76,7 @@ func (s *MessageService) checkOwnership(ctx context.Context, userID uint64, conv
 	if err != nil {
 		return normalizeConversationError(err)
 	}
-	if conversation.UserID != userID {
+	if conversation == nil || conversation.UserID != userID {
 		return ErrConversationNotFound
 	}
 

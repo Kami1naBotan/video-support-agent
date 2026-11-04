@@ -34,6 +34,7 @@ Authorization: Bearer <access_token>
 | GET | /api/v1/conversations/:id | 会话所有者 | 200 |
 | POST | /api/v1/conversations/:id/messages | 会话所有者 | 201 |
 | GET | /api/v1/conversations/:id/messages | 会话所有者 | 200 |
+| GET | /api/v1/conversations/:id/agent-runs/:run_id | 会话及 Run 所有者 | 200，只读恢复 |
 | POST | /api/v1/conversations/:id/messages/stream | 会话所有者 | 200，业务完成以 done 为准 |
 | GET | /api/v1/conversations | 已登录，仅自己的会话 | 200 |
 
@@ -173,6 +174,10 @@ GET /api/v1/conversations/:id
 
 ## 写入消息
 
+> 本节至“查询消息历史”之前的聊天流程与示例描述保留的旧聊天入口。
+> 当前 cmd/api 默认使用 Agent：文本与 confirmed_action 二选一，普通响应包含 agent/messages，SSE 有工具及确认事件。
+> 当前完整字段、错误映射和事件顺序见 [README 的 Agent 契约](../README.md#agent-消息与本人恢复契约)及 [SSE 协议](../README.md#sse-流式聊天)，不能将下面的旧事件表当作完整 Agent 协议。
+
 POST /api/v1/conversations/:id/messages
 
 ```json
@@ -210,7 +215,7 @@ id、conversation_id、role、content、created_at。
 客户端随后通过 GET 消息历史获取模型回答。
 当前为非流式响应，不返回 SSE 事件。
 
-当前没有请求幂等机制。网络超时不能直接证明保存失败，
+普通文本咨询没有跨请求幂等键，Agent工单确认另有原操作Key幂等契约。网络超时不能直接证明保存失败，
 客户端应先查询历史，避免自动重试造成重复消息。
 会话占用仅保护当前实例，不支持多副本协调。
 
@@ -276,7 +281,7 @@ data: {"user_message_id":10,"assistant_message_id":11}
 |---|---|---|
 | start | conversation_id | 本轮流式处理开始，不代表模型已成功返回 |
 | token | content | 新增文本片段，保留空格和换行 |
-| citation | items | 引用数组；当前未接入 RAG，返回空数组 |
+| citation | items | 引用数组；旧无检索入口为空，RAG与Agent可携带已校验引用 |
 | error | code、message | 处理失败，客户端停止等待正常完成 |
 | done | user_message_id、assistant_message_id | 事务提交成功后的两条消息 ID |
 
@@ -325,6 +330,10 @@ done 在保存成功后发送；HTTP 200、收到文本、连接结束，
 
 ## 查询消息历史
 
+当前 Agent 历史在原 Message 上增加可选 agent_run_id 与 agent 安全摘要；旧消息可以没有这些字段。
+本人 Run 的只读恢复接口为 `GET /api/v1/conversations/:id/agent-runs/:run_id`，需登录及会话归属校验，
+成功返回 stored 与本次观察，失败可能携带 recovery 部分结果；详见上方 README 契约。
+
 GET /api/v1/conversations/:id/messages
 
 只允许访问自己的会话，从 MySQL 按消息 ID 升序读取。
@@ -333,6 +342,9 @@ GET /api/v1/conversations/:id/messages
 Redis 缓存缺失不触发历史消息删除或自动缓存回填。
 
 ## 错误响应
+
+Agent 错误在 code/message 之外可能携带 agent、messages 或 recovery，不能丢弃其中的已提交事实。
+下表中的旧模型错误码不替代 Agent 专用映射，后者见 README 的 Agent 契约。
 
 普通接口及流式响应开始前的错误使用以下 JSON 结构。
 流式响应开始后的错误将同样的结构放入 error 事件的 data 中：
