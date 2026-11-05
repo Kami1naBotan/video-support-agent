@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"video-support-agent/internal/knowledgeevent"
 
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
@@ -26,6 +27,10 @@ func (r *KnowledgeRepository) PublishVersion(ctx context.Context, operatorID uin
 	var saved service.KnowledgePublicationResult
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := r.advanceKnowledgeEpoch(tx); err != nil {
+			return err
+		}
+
 		var document model.KnowledgeDocument
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", input.DocumentID).First(&document).Error
 
@@ -152,7 +157,15 @@ func (r *KnowledgeRepository) PublishVersion(ctx context.Context, operatorID uin
 			PublicationRevision: nextRevision,
 			PublishedAt:         now,
 		}
-		return nil
+
+		return r.appendSourceEvent(
+			tx,
+			knowledgeevent.VersionPublished,
+			document.ID,
+			version.ID,
+			version.ContentRevision,
+			nextRevision,
+		)
 	})
 
 	if err != nil {

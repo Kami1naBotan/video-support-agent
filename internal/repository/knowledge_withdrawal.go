@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"video-support-agent/internal/knowledgeevent"
 
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
@@ -26,6 +27,10 @@ func (r *KnowledgeRepository) WithdrawVersion(ctx context.Context, operatorID ui
 	var saved service.KnowledgeWithdrawalResult
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := r.advanceKnowledgeEpoch(tx); err != nil {
+			return err
+		}
+
 		var document model.KnowledgeDocument
 		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", input.DocumentID).First(&document).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -114,7 +119,15 @@ func (r *KnowledgeRepository) WithdrawVersion(ctx context.Context, operatorID ui
 			PublicationRevision: nextRevision,
 			WithdrawnAt:         now,
 		}
-		return nil
+
+		return r.appendSourceEvent(
+			tx,
+			knowledgeevent.VersionWithdrawn,
+			document.ID,
+			version.ID,
+			version.ContentRevision,
+			nextRevision,
+		)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("withdraw knowledge version transaction: %w", err)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"video-support-agent/internal/elasticsearch"
+	"video-support-agent/internal/generationquery"
 	"video-support-agent/internal/middleware"
 	"video-support-agent/internal/retrieval"
 
@@ -326,6 +327,12 @@ func TestKnowledgeSearchHTTPErrorMapping(t *testing.T) {
 		code    string
 		message string
 	}{
+		{"generation_resolve", generationquery.ErrResolve, 503,
+			"search_generation_unavailable", "published search generation is temporarily unavailable"},
+		{"generation_target", generationquery.ErrTarget, 503,
+			"search_generation_invalid", "published search generation is invalid"},
+		{"generation_timeout", errors.Join(generationquery.ErrResolve, context.DeadlineExceeded), 504,
+			"request_timeout", "request timed out"},
 		{"invalid_query", retrieval.ErrInvalidQuery, 400,
 			"invalid_search_query", "invalid search query"},
 		{"invalid_candidates", retrieval.ErrInvalidCandidates, 500,

@@ -32,7 +32,7 @@ func (c *Client) GetAliasTarget(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	if status != http.StatusOK {
-		return "", fmt.Errorf("%w: read alias returned HTTP %d", ErrRejected, status)
+		return "", fmt.Errorf("%w: read alias returned HTTP %d", statusErrorKind(status), status)
 	}
 
 	var result map[string]struct {
@@ -99,10 +99,11 @@ func (c *Client) CreateIndex(ctx context.Context, index string, definition []byt
 	}
 
 	if status != http.StatusOK {
-		if status >= 500 || status == http.StatusRequestTimeout {
-			return fmt.Errorf("%w: create index returned HTTP %d", ErrStateUnknown, status)
+		kind := statusErrorKind(status)
+		if transientStatus(status) {
+			return fmt.Errorf("%w: %w: create index returned HTTP %d", ErrStateUnknown, kind, status)
 		}
-		return fmt.Errorf("%w: create index returned HTTP %d", ErrRejected, status)
+		return fmt.Errorf("%w: create index returned HTTP %d", kind, status)
 	}
 
 	var result struct {

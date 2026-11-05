@@ -79,11 +79,11 @@ func TestESProtocolVerificationFailures(t *testing.T) {
 		body   string
 		want   error
 	}{
-		{"refresh_status", 1, 503, protocolSecret, ErrRejected},
+		{"refresh_status", 1, 503, protocolSecret, ErrUnavailable},
 		{"refresh_failed_shard", 1, 200,
 			`{"_shards":{"total":1,"successful":0,"failed":1}}`, ErrResponse},
 		{"refresh_missing_shards", 1, 200, `{}`, ErrResponse},
-		{"count_status", 2, 503, protocolSecret, ErrRejected},
+		{"count_status", 2, 503, protocolSecret, ErrUnavailable},
 		{"count_mismatch", 2, 200,
 			`{"count":4,"_shards":{"total":1,"successful":1,"failed":0}}`,
 			ErrRejected},

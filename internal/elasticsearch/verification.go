@@ -51,7 +51,7 @@ func (c *Client) VerifyIndex(ctx context.Context, index string, documents []inde
 		return fmt.Errorf("refresh index: %w", err)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("%w: refresh returned HTTP %d", ErrRejected, status)
+		return fmt.Errorf("%w: refresh returned HTTP %d", statusErrorKind(status), status)
 	}
 
 	var refresh struct {
@@ -66,7 +66,7 @@ func (c *Client) VerifyIndex(ctx context.Context, index string, documents []inde
 		return fmt.Errorf("count index: %w", err)
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("%w: count returned HTTP %d", ErrRejected, status)
+		return fmt.Errorf("%w: count returned HTTP %d", statusErrorKind(status), status)
 	}
 
 	var count struct {
@@ -105,7 +105,7 @@ func (c *Client) VerifyIndex(ctx context.Context, index string, documents []inde
 			return fmt.Errorf("read verification sample: %w", err)
 		}
 		if status != http.StatusOK {
-			return fmt.Errorf("%w: sample read returned HTTP %d for ID %s", ErrRejected, status, document.id)
+			return fmt.Errorf("%w: sample read returned HTTP %d for ID %s", statusErrorKind(status), status, document.id)
 		}
 
 		var sample struct {

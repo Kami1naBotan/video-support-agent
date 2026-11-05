@@ -386,7 +386,8 @@ func TestKnowledgeMySQL(t *testing.T) {
 			Must(t, observer.Where("article_id = ?", article.ID).Find(&chunks).Error)
 			Equal(t, len(chunks), 1)
 			Equal(t, chunks[0].ChunkIndex, uint32(0))
-			Equal(t, chunks[0].Content, article.Content)
+			// article-v1 normalizes only the projection; the raw article assertion above remains unchanged.
+			Equal(t, chunks[0].Content, strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(article.Content, "\r\n", "\n"), "\r", "\n")))
 		}
 
 		// 外部文档的条款不能混入本版本。

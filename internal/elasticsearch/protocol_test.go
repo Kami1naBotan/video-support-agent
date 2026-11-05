@@ -338,7 +338,7 @@ func TestESProtocolAliasRead(t *testing.T) {
 		{"routed", 200,
 			`{"a":{"aliases":{"test_rules_current":{"is_write_index":false,"routing":"x"}}}}`,
 			"", ErrResponse},
-		{"unavailable_status", 503, protocolSecret, "", ErrRejected},
+		{"unavailable_status", 503, protocolSecret, "", ErrUnavailable},
 	}
 
 	for _, tc := range cases {

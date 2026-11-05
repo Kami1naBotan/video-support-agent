@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"video-support-agent/internal/elasticsearch"
+	"video-support-agent/internal/generationquery"
 	"video-support-agent/internal/llm"
 	"video-support-agent/internal/rag"
 	"video-support-agent/internal/retrieval"
@@ -67,6 +68,14 @@ func classifyResponseError(err error) (int, ErrorResponse) {
 		status = http.StatusServiceUnavailable
 		code = "search_index_not_ready"
 		message = "search index is not ready"
+	case errors.Is(err, generationquery.ErrResolve):
+		status = http.StatusServiceUnavailable
+		code = "search_generation_unavailable"
+		message = "published search generation is temporarily unavailable"
+	case errors.Is(err, generationquery.ErrTarget):
+		status = http.StatusServiceUnavailable
+		code = "search_generation_invalid"
+		message = "published search generation is invalid"
 	case errors.Is(err, retrieval.ErrVerificationFailed):
 		status = http.StatusServiceUnavailable
 		code = "search_verification_failed"

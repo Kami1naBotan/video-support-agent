@@ -364,7 +364,7 @@ func TestESProtocolBulkStopsAfterPartialFailure(t *testing.T) {
 	)
 
 	err := client.BulkIndex(context.Background(), protocolIndex, documents)
-	requireProtocolError(t, err, ErrRejected)
+	requireProtocolError(t, err, ErrUnavailable)
 	// The script permits no third batch and no retry of the second batch.
 }
 

@@ -163,10 +163,16 @@ func runKnowledgeCompetition(t *testing.T, firstOp, secondOp string) {
 		}
 	})
 
+	// An edit now locks document before version. For edit/edit, the second
+	// transaction blocks on the document and cannot reach its version query.
+	secondLockTable := "rule_versions"
+	if firstOp == "edit" && secondOp == "edit" {
+		secondLockTable = "knowledge_documents"
+	}
 	Must(t, secondDB.Callback().Query().Before("gorm:query").
 		Register(secondCallback, func(tx *gorm.DB) {
 			if tx.Statement.Schema == nil ||
-				tx.Statement.Schema.Table != "rule_versions" {
+				tx.Statement.Schema.Table != secondLockTable {
 				return
 			}
 			if _, exists := tx.Statement.Clauses["FOR"]; !exists {
@@ -261,7 +267,7 @@ func runKnowledgeCompetition(t *testing.T, firstOp, secondOp string) {
 	t.Log("NOWAIT probe confirmed the first transaction holds the version lock")
 
 	secondDone := start(secondDB, secondOp, "second")
-	awaitSignal(secondEntering, "second version query")
+	awaitSignal(secondEntering, "second locking query: "+secondLockTable)
 	release()
 
 	first := awaitResult(firstDone, "first")

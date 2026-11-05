@@ -29,6 +29,17 @@ type SearchHit struct {
 }
 
 func (c *Client) SearchPrepared(ctx context.Context, query *PreparedQuery) ([]SearchHit, error) {
+	return c.searchPrepared(ctx, "", true, query)
+}
+
+func (c *Client) SearchPreparedAt(ctx context.Context, target string, query *PreparedQuery) ([]SearchHit, error) {
+	if !targetPattern.MatchString(target) {
+		return nil, ErrInput
+	}
+	return c.searchPrepared(ctx, target, false, query)
+}
+
+func (c *Client) searchPrepared(ctx context.Context, target string, resolveAlias bool, query *PreparedQuery) ([]SearchHit, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -44,12 +55,14 @@ func (c *Client) SearchPrepared(ctx context.Context, query *PreparedQuery) ([]Se
 		return nil, err
 	}
 
-	target, err := c.GetAliasTarget(ctx)
-	if err != nil {
-		return nil, err
+	if resolveAlias {
+		target, err = c.GetAliasTarget(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if target == "" {
-		return nil, fmt.Errorf("%w: vector alias is absent", retrieval.ErrIndexNotReady)
+		return nil, fmt.Errorf("%w: vector target is absent", retrieval.ErrIndexNotReady)
 	}
 
 	collectionID, err := c.VerifyCollectionContract(ctx, target, q.Identity)
@@ -87,8 +100,7 @@ func (c *Client) SearchPrepared(ctx context.Context, query *PreparedQuery) ([]Se
 	}
 
 	var rows []json.RawMessage
-	if json.Unmarshal(data, &rows) != nil ||
-		rows == nil || len(rows) > q.CandidateLimit {
+	if json.Unmarshal(data, &rows) != nil || rows == nil || len(rows) > q.CandidateLimit {
 		return nil, fmt.Errorf("%w: invalid search result list", ErrResponse)
 	}
 

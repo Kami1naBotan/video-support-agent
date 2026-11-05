@@ -13,6 +13,17 @@ import (
 var _ retrieval.CandidateSearcher = (*Client)(nil)
 
 func (c *Client) SearchCandidates(ctx context.Context, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
+	return c.searchCandidates(ctx, "", true, query, opts, at)
+}
+
+func (c *Client) SearchCandidatesAt(ctx context.Context, target string, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
+	if c == nil || !indexNamePattern.MatchString(target) || target == c.alias {
+		return nil, retrieval.ErrIndexNotReady
+	}
+	return c.searchCandidates(ctx, target, false, query, opts, at)
+}
+
+func (c *Client) searchCandidates(ctx context.Context, target string, resolveAlias bool, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -28,9 +39,11 @@ func (c *Client) SearchCandidates(ctx context.Context, query string, opts retrie
 		return nil, err
 	}
 
-	target, err := c.GetAliasTarget(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("resolve search alias: %w", err)
+	if resolveAlias {
+		target, err = c.GetAliasTarget(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("resolve search alias: %w", err)
+		}
 	}
 	if target == "" {
 		return nil, retrieval.ErrIndexNotReady

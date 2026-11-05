@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"video-support-agent/internal/knowledgechunk"
+	"video-support-agent/internal/knowledgeevent"
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
 
@@ -22,14 +24,38 @@ func (r *KnowledgeRepository) EditDraftWithVerification(ctx context.Context, ver
 		return nil, nil, fmt.Errorf("%w: articles must contain at least one article", service.ErrInvalidArgument)
 	}
 
+	var locator model.RuleVersion
+	err := r.db.WithContext(ctx).
+		Select("id", "document_id").
+		Where("id = ?", versionID).
+		First(&locator).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, service.ErrKnowledgeVersionNotFound
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("locate knowledge version document: %w", err)
+	}
+
 	var saved model.RuleVersion
 	var verification *model.RuleVerification
 
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var document model.KnowledgeDocument
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Select("id", "publication_revision").
+			Where("id = ?", locator.DocumentID).
+			First(&document).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return service.ErrKnowledgeDocumentNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("lock draft document: %w", err)
+		}
+
 		var version model.RuleVersion
-
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", versionID).First(&version).Error
-
+		err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id = ? AND document_id = ?", versionID, document.ID).
+			First(&version).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return service.ErrKnowledgeVersionNotFound
 		}
@@ -104,10 +130,9 @@ func (r *KnowledgeRepository) EditDraftWithVerification(ctx context.Context, ver
 				return fmt.Errorf("insert rule article %d: %w", i+1, err)
 			}
 
-			chunk := model.KnowledgeChunk{
-				ArticleID:  article.ID,
-				ChunkIndex: 0,
-				Content:    article.Content,
+			chunk, err := knowledgechunk.FromArticle(article.ID, article.Content)
+			if err != nil {
+				return fmt.Errorf("%w: invalid article projection", service.ErrInvalidArgument)
 			}
 
 			if err := tx.Omit(clause.Associations).Create(&chunk).Error; err != nil {
@@ -122,16 +147,21 @@ func (r *KnowledgeRepository) EditDraftWithVerification(ctx context.Context, ver
 		var latest model.RuleVerification
 		err = tx.Clauses(clause.Locking{Strength: "SHARE"}).Select("id", "version_id", "verified_content_revision", "verified_by", "verified_at", "verification_note", "evidence_url").Where("version_id = ?", version.ID).Order("id DESC").Take(&latest).Error
 
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
-		}
-		if err != nil {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return fmt.Errorf("read verification after draft edit: %w", err)
 		}
+		if err == nil {
+			verification = &latest
+		}
 
-		verification = &latest
-
-		return nil
+		return r.appendSourceEvent(
+			tx,
+			knowledgeevent.DraftUpdated,
+			document.ID,
+			saved.ID,
+			saved.ContentRevision,
+			document.PublicationRevision,
+		)
 	})
 
 	if err != nil {

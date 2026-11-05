@@ -135,7 +135,8 @@ func TestKnowledgeWithdrawalMySQLSuccessAndHistory(t *testing.T) {
 		f.ctx, f.userID, withdrawalInput(current, 2),
 	)
 	Must(t, err)
-	Equal(t, f.calls.Load()-calls, int64(1))
+	// Epoch metadata, business withdrawal time, and source Outbox time are distinct reads.
+	Equal(t, f.calls.Load()-calls, int64(3))
 	withdrawalWantCommitted(t, f, before, result)
 	switchWantFrozen(t, f.state(t, old.ID).Content, oldBefore.Content)
 	withdrawalWantNoCurrent(t, f, old.DocumentID)
@@ -496,7 +497,7 @@ func TestKnowledgeWithdrawalMySQLConcurrency(t *testing.T) {
 			Must(t, f.second.Callback().Query().Before("gorm:query").
 				Register(secondName, func(tx *gorm.DB) {
 					if tx.Statement.Schema == nil ||
-						tx.Statement.Schema.Table != "knowledge_documents" {
+						tx.Statement.Schema.Table != "knowledge_index_controls" {
 						return
 					}
 					if _, ok := tx.Statement.Clauses["FOR"]; !ok {

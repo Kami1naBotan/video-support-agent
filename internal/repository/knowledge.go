@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"video-support-agent/internal/knowledgechunk"
+	"video-support-agent/internal/knowledgeevent"
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
 
@@ -74,10 +76,9 @@ func (r *KnowledgeRepository) CreateDraft(ctx context.Context, document *model.K
 				return fmt.Errorf("insert rule article %d: %w", i+1, err)
 			}
 
-			chunk := model.KnowledgeChunk{
-				ArticleID:  article.ID,
-				ChunkIndex: 0,
-				Content:    article.Content,
+			chunk, err := knowledgechunk.FromArticle(article.ID, article.Content)
+			if err != nil {
+				return fmt.Errorf("%w: invalid article projection", service.ErrInvalidArgument)
 			}
 
 			if err := tx.Omit(clause.Associations).Create(&chunk).Error; err != nil {
@@ -85,7 +86,14 @@ func (r *KnowledgeRepository) CreateDraft(ctx context.Context, document *model.K
 			}
 		}
 
-		return nil
+		return r.appendSourceEvent(
+			tx,
+			knowledgeevent.DraftCreated,
+			document.ID,
+			version.ID,
+			version.ContentRevision,
+			document.PublicationRevision,
+		)
 	})
 
 	if err != nil {

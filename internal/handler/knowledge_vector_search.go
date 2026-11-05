@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"video-support-agent/internal/generationquery"
 
 	"video-support-agent/internal/embedding"
 	"video-support-agent/internal/middleware"
@@ -190,6 +191,18 @@ func writeVectorSearchError(c *gin.Context, err error) {
 		response = ErrorResponse{
 			Code:    "search_index_not_ready",
 			Message: "search index is not ready",
+		}
+	case errors.Is(err, generationquery.ErrResolve):
+		status = http.StatusServiceUnavailable
+		response = ErrorResponse{
+			Code:    "search_generation_unavailable",
+			Message: "published search generation is temporarily unavailable",
+		}
+	case errors.Is(err, generationquery.ErrTarget):
+		status = http.StatusServiceUnavailable
+		response = ErrorResponse{
+			Code:    "search_generation_invalid",
+			Message: "published search generation is invalid",
 		}
 	case errors.Is(err, embedding.ErrModelMismatch):
 		status = http.StatusServiceUnavailable

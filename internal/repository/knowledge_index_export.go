@@ -65,6 +65,10 @@ type indexExportRow struct {
 }
 
 func (r *KnowledgeRepository) ExportCurrent(ctx context.Context) (*indexing.Snapshot, error) {
+	return r.exportCurrent(ctx, nil)
+}
+
+func (r *KnowledgeRepository) exportCurrent(ctx context.Context, before func(*gorm.DB) error) (*indexing.Snapshot, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -74,6 +78,12 @@ func (r *KnowledgeRepository) ExportCurrent(ctx context.Context) (*indexing.Snap
 	}
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if before != nil {
+			if err := before(tx); err != nil {
+				return err
+			}
+		}
+
 		var source struct {
 			DatabaseName sql.NullString
 			ServerUUID   string

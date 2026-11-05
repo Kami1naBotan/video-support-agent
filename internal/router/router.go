@@ -47,7 +47,7 @@ func newRouter(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contex
 		panic("invalid trusted proxy configuration")
 	}
 
-	r.Use(middleware.SafeAccessLog(appLogger), middleware.SafeRecovery(appLogger))
+	r.Use(middleware.SafeAccessLog(appLogger), middleware.SafeRecovery(appLogger), middleware.RequestTrace())
 
 	healthHandler := handler.NewHealthHandler(cfg.AppName)
 	r.GET("/", func(c *gin.Context) { c.JSON(200, gin.H{"message": cfg.AppName + " is running"}) })
@@ -106,6 +106,7 @@ func newRouter(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contex
 	knowledge.POST("/documents", knowledgeHandler.Create)
 	knowledge.POST("/documents/:document_id/versions", knowledgeHandler.CreateRevision)
 	knowledge.GET("/documents/:document_id", knowledgeHandler.GetDocumentState)
+	knowledge.GET("/documents/:document_id/deliveries", knowledgeHandler.GetDocumentDeliveries)
 	knowledge.POST("/documents/:document_id/publish", knowledgeHandler.Publish)
 	knowledge.POST("/documents/:document_id/withdraw", knowledgeHandler.Withdraw)
 	knowledge.GET("/versions/:version_id", knowledgeHandler.GetByID)

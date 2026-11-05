@@ -318,8 +318,15 @@ func TestKnowledgePublicationMySQLTimeAndFreeze(t *testing.T) {
 			v := f.draft(t, tc.effective, tc.expires, true)
 			before := f.state(t, v.ID)
 
+			// Exclude setup; epoch and business time are read on all paths.
+			// A successful publication also timestamps the source Outbox.
+			calls := f.calls.Load()
 			result, err := f.svc(f.db).PublishVersion(f.ctx, f.userID, publicationInput(v))
-			Equal(t, f.calls.Load(), int64(1))
+			wantCalls := int64(2)
+			if tc.want == nil {
+				wantCalls = 3
+			}
+			Equal(t, f.calls.Load()-calls, wantCalls)
 			if tc.want != nil {
 				if result != nil || !errors.Is(err, tc.want) {
 					t.Fatalf("result=%+v error=%v want=%v", result, err, tc.want)
@@ -742,8 +749,10 @@ func runPublicationCompetition(t *testing.T, firstOp, secondOp string) {
 	t.Cleanup(func() { Must(t, f.db.Callback().Query().Remove(firstName)) })
 
 	secondTable := "rule_versions"
-	if firstOp == "publish" && secondOp == "publish" {
+	if secondOp == "edit" || (secondOp == "publish" && firstOp == "edit") {
 		secondTable = "knowledge_documents"
+	} else if firstOp == "publish" && secondOp == "publish" {
+		secondTable = "knowledge_index_controls"
 	}
 	secondName := f.prefix + "_second"
 	Must(t, f.second.Callback().Query().Before("gorm:query").Register(secondName, func(tx *gorm.DB) {
@@ -807,6 +816,7 @@ func runPublicationCompetition(t *testing.T, firstOp, secondOp string) {
 		}
 	}
 
+	initialClockCalls := f.calls.Load()
 	firstDone := start(f.db, firstOp, v)
 	awaitSignal(firstLocked)
 
@@ -834,7 +844,7 @@ func runPublicationCompetition(t *testing.T, firstOp, secondOp string) {
 	if secondOp == "expiry" {
 		// 第二个发布操作已经到达版本锁读取入口。
 		// 在第一事务释放锁前跨过失效终点，发布必须按新时间拒绝。
-		Equal(t, f.calls.Load(), int64(0))
+		Equal(t, f.calls.Load(), initialClockCalls+1) // epoch timestamp only; effective-time check is still behind the version lock
 		f.now.Store(end.UnixNano())
 	}
 	release()
@@ -901,7 +911,7 @@ func runPublicationCompetition(t *testing.T, firstOp, secondOp string) {
 			Equal(t, state.Content.Document.CurrentVersionID, (*uint64)(nil))
 			Equal(t, state.Content.Document.PublicationRevision, uint64(0))
 			Equal(t, len(state.Operations), 0)
-			Equal(t, f.calls.Load(), int64(1))
+			Equal(t, f.calls.Load(), initialClockCalls+2) // epoch time plus effective-time check; rejected publication emits no event
 		} else {
 			f.published(t, v, second.publication)
 		}

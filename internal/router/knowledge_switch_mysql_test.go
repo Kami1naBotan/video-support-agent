@@ -567,8 +567,10 @@ func TestKnowledgeSwitchMySQLConcurrency(t *testing.T) {
 			})
 
 			secondTable := "rule_versions"
-			if firstOp == "publish" && secondOp == "publish" {
+			if secondOp == "edit" || firstOp == "edit" {
 				secondTable = "knowledge_documents"
+			} else {
+				secondTable = "knowledge_index_controls"
 			}
 			secondName := f.prefix + "_switch_second"
 			Must(t, f.second.Callback().Query().Before("gorm:query").

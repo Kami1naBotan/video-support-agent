@@ -14,6 +14,7 @@ import (
 	"video-support-agent/internal/confirmation"
 	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/embedding"
+	"video-support-agent/internal/generationquery"
 	"video-support-agent/internal/llm"
 	"video-support-agent/internal/milvus"
 	"video-support-agent/internal/repository"
@@ -103,6 +104,13 @@ func run() error {
 	defer func() { _ = sqlDB.Close() }()
 	appLogger.Info("database connected")
 
+	indexReady, err := checkKnowledgeAPIStartup(context.Background(), db, cfg, os.Getenv("KNOWLEDGE_SOURCE_SERVER_UUID"))
+	if err != nil {
+		return err
+	}
+
+	appLogger.Info("knowledge startup checks passed", zap.Bool("active_generation_ready", indexReady))
+
 	searchClient, err := elasticsearch.NewClient(cfg.Elasticsearch)
 	if err != nil {
 		return errors.New("initialize Elasticsearch client failed")
@@ -111,12 +119,10 @@ func run() error {
 
 	searchRepository := repository.NewKnowledgeRepository(db)
 
-	searchService, err := retrieval.NewService(searchClient, searchRepository)
+	activeRepository, err := repository.NewKnowledgeActiveRepository(db)
 	if err != nil {
-		return errors.New("initialize retrieval service failed")
+		return errors.New("initialize active generation repository failed")
 	}
-
-	appLogger.Info("retrieval dependencies initialized")
 
 	embeddingClient, err := embedding.NewClient(cfg.Embedding)
 	if err != nil {
@@ -135,12 +141,12 @@ func run() error {
 		return errors.New("initialize vector candidate searcher failed")
 	}
 
-	vectorRetriever, err := retrieval.NewMilvusRetriever(vectorSearcher, searchRepository, vectorRetrievalTimeout)
+	retrievers, err := generationquery.NewRetrievers(activeRepository, searchClient, vectorSearcher, searchRepository, searchRepository, nil, vectorRetrievalTimeout)
 	if err != nil {
-		return errors.New("initialize vector retriever failed")
+		return errors.New("initialize generation retrieval failed")
 	}
 
-	appLogger.Info("vector retrieval dependencies initialized")
+	appLogger.Info("generation retrieval dependencies initialized")
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:                  cfg.Redis.Addr,
@@ -185,12 +191,10 @@ func run() error {
 		return errors.New("initialize Agent models failed; check LLM_BASE_URL, LLM_MODEL, LLM_API_KEY and LLM_TIMEOUT (0 < timeout <= 30s)")
 	}
 
-	hybridRetriever, err := retrieval.NewHybridService(searchClient, vectorSearcher, searchRepository, nil)
-	if err != nil {
-		return errors.New("initialize hybrid retrieval failed")
-	}
-
-	loggedHybrid, err := retrieval.NewLoggedHybridRetriever(hybridRetriever, appLogger)
+	loggedHybrid, err := retrieval.NewLoggedHybridRetriever(
+		retrievers.Hybrid,
+		appLogger,
+	)
 	if err != nil {
 		return errors.New("initialize hybrid retrieval logging failed")
 	}
@@ -202,9 +206,25 @@ func run() error {
 
 	appLogger.Info("Agent chat dependencies initialized")
 
-	r := router.NewWithMessageHandler(cfg, db, tokenManager, contextStore, userLimiter, authLimiter, appLogger, nil, searchService, vectorRetriever, messageHandler)
+	r := router.NewWithMessageHandler(
+		cfg,
+		db,
+		tokenManager,
+		contextStore,
+		userLimiter,
+		authLimiter,
+		appLogger,
+		nil,
+		retrievers.Keyword,
+		retrievers.Vector,
+		messageHandler,
+	)
 	appLogger.Info("starting API server")
-	appLogger.Info("server configuration", zap.String("app_name", cfg.AppName), zap.String("environment", cfg.Env), zap.String("port", cfg.Port), zap.String("log_level", cfg.LogLevel))
+	appLogger.Info("server configuration",
+		zap.String("app_name", cfg.AppName),
+		zap.String("environment", cfg.Env),
+		zap.String("port", cfg.Port),
+		zap.String("log_level", cfg.LogLevel))
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

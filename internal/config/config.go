@@ -18,6 +18,7 @@ type Config struct {
 	Elasticsearch      ElasticsearchConfig
 	Embedding          EmbeddingConfig
 	Milvus             MilvusConfig
+	Kafka              KafkaConfig
 	TrustedProxies     []string
 }
 
@@ -138,6 +139,7 @@ func Load() Config {
 			CollectionAlias: getEnv("MILVUS_COLLECTION_ALIAS", "rule_chunks_vector_current"),
 			Timeout:         getEnv("MILVUS_TIMEOUT", "5s"),
 		},
+		Kafka:          LoadKafkaConfig(),
 		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}
 }

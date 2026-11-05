@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"video-support-agent/internal/knowledgechunk"
+	"video-support-agent/internal/knowledgeevent"
 
 	"video-support-agent/internal/model"
 	"video-support-agent/internal/service"
@@ -42,7 +44,7 @@ func (r *KnowledgeRepository) CreateRevision(ctx context.Context, version *model
 
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var document model.KnowledgeDocument
-		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id").Where("id = ?", saved.DocumentID).First(&document).Error
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Select("id", "publication_revision").Where("id = ?", saved.DocumentID).First(&document).Error
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return service.ErrKnowledgeDocumentNotFound
@@ -83,10 +85,9 @@ func (r *KnowledgeRepository) CreateRevision(ctx context.Context, version *model
 				return fmt.Errorf("insert revision article %d: %w", i+1, err)
 			}
 
-			chunk := model.KnowledgeChunk{
-				ArticleID:  article.ID,
-				ChunkIndex: 0,
-				Content:    article.Content,
+			chunk, err := knowledgechunk.FromArticle(article.ID, article.Content)
+			if err != nil {
+				return fmt.Errorf("%w: invalid article projection", service.ErrInvalidArgument)
 			}
 
 			if err := tx.Omit(clause.Associations).Create(&chunk).Error; err != nil {
@@ -94,7 +95,14 @@ func (r *KnowledgeRepository) CreateRevision(ctx context.Context, version *model
 			}
 		}
 
-		return nil
+		return r.appendSourceEvent(
+			tx,
+			knowledgeevent.RevisionCreated,
+			document.ID,
+			saved.ID,
+			saved.ContentRevision,
+			document.PublicationRevision,
+		)
 	})
 
 	if err != nil {

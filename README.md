@@ -24,7 +24,7 @@ Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
 两类独立搜索 API 保留原有排序和错误语义；聊天通过 HybridService 并行召回、RRF 融合及 MySQL 回源，支持单路故障降级。
 
 前端展示规则引用、历史条款状态、工具执行过程、确认卡片与本人 Run 恢复结果。
-尚无独立搜索前端、实际 Rerank 模型、Kafka 或 Kubernetes。
+已接入 Kafka 事件驱动的知识库更新与独立 Worker；尚无独立搜索前端、实际 Rerank 模型或 Kubernetes。
 
 项目不是 Bilibili 官方客服，不能查询真实账号或向平台办理申诉。
 本地工单只记录本系统申请，不代表平台受理或申诉通过。
@@ -33,6 +33,7 @@ Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
 ## 当前技术栈
 
 Go、Gin、GORM、MySQL、Redis、bcrypt、JWT、Zap、Docker Compose。
+Kafka 4.1.1（本地单 broker），Go 客户端统一使用 franz-go v1.22.2。
 Vue 3、TypeScript、Vite、Vue Router、Pinia、Axios、Element Plus、Nginx。
 Eino、Eino OpenAI 兼容模型适配器。
 Elasticsearch 8.19.0，通过 HTTP API 使用，采用独立 Docker Compose 项目部署。
@@ -171,8 +172,8 @@ API 还需要后文所列 ES、Ollama Embedding 和 Milvus 配置，以及从同
 | 变量 | 配置要求 |
 |---|---|
 | APPEAL_CONFIRMATION_KEY_BASE64 | 独立生成的32个密码学随机字节，以标准带填充Base64编码；编码长度44字符 |
-| APPEAL_CONFIRMATION_ISSUER | 默认go-ai-agent-appeal |
-| APPEAL_CONFIRMATION_AUDIENCE | 默认go-ai-agent-appeal-create |
+| APPEAL_CONFIRMATION_ISSUER | 默认video-support-agent-appeal |
+| APPEAL_CONFIRMATION_AUDIENCE | 默认video-support-agent-appeal-create |
 
 Issuer与Audience为1～128字节可打印ASCII，不允许空白字符。签名密钥不得复用JWT_SECRET。
 配置缺失、非规范Base64或解码长度不符会停止API启动，不会静默禁用确认校验。
@@ -475,7 +476,7 @@ SSE 正文发送后保存阶段使用独立 3 秒上限；配置不是强制终�
 
 ### 使用范围与质量说明
 
-规则必须先录入、核验并发布，再显式重建 ES/Milvus 派生索引；聊天不会自动抓取、录入或发布规则。
+规则先录入、核验并发布，随后由独立 Worker 异步构建并发布 ES/Milvus 目标对；聊天不会自动抓取、录入或发布规则。
 独立搜索能返回数据不代表实际聊天模型可用，模型返回成功也不代表引用适用或消息已保存。
 
 现有真实来源演示只包含面向中国大陆以外用户的协议第 2.8 条节选；不能扩展为完整协议或生产召回质量结论。
@@ -650,6 +651,69 @@ try {
 
 若直连事件能及时到达，而代理入口延迟整个响应，
 检查 Nginx 生效配置、是否已 reload，以及响应缓冲和压缩配置。
+
+## Kafka 知识库异步更新
+
+API与Worker是独立进程。API在规则事务中写入源Outbox；Worker内的relay负责发送Kafka消息，API不等待broker在线。当前已实现Worker双索引与恢复、API代际查询接线和只读启动检查。独立隔离环境已验证API发布→Kafka→Worker→固定bge-m3模型推理→双索引查询，以及Worker强制停止后的下线积压恢复、empty代际和API重启。两路检索命中相同chunk，并与MySQL活动目标摘要互证；该结果不代表对话模型评测或生产性能容量。
+
+```mermaid
+flowchart TD
+    A["管理员 API：草稿 / 发布 / 下线"] --> T["MySQL 事务：业务变更 + 源 Outbox"]
+    T --> R["独立 Worker：Outbox relay"]
+    R --> K["knowledge.document.events"]
+    K --> C["Source Consumer"]
+    C --> I["持久 inbox / 期望状态 / 任务"]
+    I --> O["持久化成功后提交 offset"]
+    I --> B["构建调度：当前 epoch / 新代际 / 租约"]
+    B --> S["同源 MySQL 快照 / 稳定 chunk / 固定 Embedding"]
+    S --> E["私有 ES 目标构建与验证"]
+    E --> V["私有 Milvus 目标构建与验证"]
+    V --> P["MySQL 发布事务：校验 epoch / owner / 双摘要，切换 active"]
+    B --> F["失败决定持久化 / 分批恢复"]
+    F --> X["派生 Retry / DLQ / 结果 Outbox"]
+    P --> Y["事件结算：终态与结果 Outbox；剩余事件分批追平"]
+    X --> R
+    Y --> R
+    R --> RT["knowledge.index.retry"]
+    R --> DLQ["knowledge.index.dlq"]
+    R --> RESULT["knowledge.index.events"]
+    RT --> RC["Retry Consumer：身份核对与持久 not_before"]
+    RC --> B
+    Q["API 关键词 / 向量 / Agent 检索"] --> G["每次检索读取一次 active；混合双路共享绑定"]
+    P -. "发布后后续查询可见" .-> G
+    G --> READ["显式物理目标查询 + MySQL 当前规则复核"]
+```
+
+图中ES先于Milvus构建，与当前编排一致；这不是跨系统事务。MySQL、ES、Milvus不能通过一次GORM事务共同提交或回滚。系统将外部副作用写入新的私有目标，只有两侧验证和发布条件均满足才在MySQL中选择目标对。失败半成品保留，恢复另建代际；旧epoch或失效owner不能覆盖active。合法空快照发布empty代际，查询返回空，不回退旧别名。物理目标目前不自动回收，容量上限限制继续创建。
+
+### 四个Topic及职责
+
+|Topic|生产方|消费/用途|
+|---|---|---|
+|knowledge.document.events|Worker relay发送API事务中的源Outbox|Source Consumer持久接收规则事件|
+|knowledge.index.retry|Worker relay发送恢复Outbox|Retry Consumer验证身份并保存到期调度|
+|knowledge.index.dlq|Worker relay发送终止或毒消息通知|保留安全死信信息供排查；当前无自动重放消费者|
+|knowledge.index.events|Worker relay发送结果Outbox|应用结果通知；当前不以消费该Topic驱动active选择|
+
+新增/编辑草稿也会产生源事件，但不使草稿成为可检索当前规则。“删除”使用下线语义，保留历史内容和引用。不是每个事件都单独重建：全局最新epoch可合并多个事件，事件身份与结果仍分别记录。
+
+### Kafka概念与本项目选择
+
+Kafka是按分区保存、按保留策略清理的追加日志；消息被某个消费者读取或提交offset后，不会因此立即删除。与典型任务队列的领取/确认模型相比，它适合多个消费组独立读取和重放历史。任务队列也可提供持久化与重试，不能简单把两者等同于可靠与不可靠。
+
+Topic是消息类别；Partition提供分区内顺序及并行单位，不提供跨分区总顺序。同一消费组内，一个分区通常交给一个成员处理；不同组各有自己的进度。重平衡或提交结果未知会导致重放，因此分区归属不能替代数据库幂等。
+
+Offset是某分区的位置，组提交位置表示下一条待消费位置。本项目源消息写入inbox/任务后才允许提交offset，提交并不表示索引已经构建完成。当前四Topic各3分区、单副本，保留7天；这是本地合同，不具备多broker高可用保证。Source与Retry使用两个稳定消费组。
+
+### 幂等、重试与死信
+
+发送已成功但回执丢失、数据库已提交但offset提交失败，都可能让相同消息再次到达。event_id与摘要识别合法重复/异载荷冲突；attempt、receipt和事务终态约束防止重复副作用。不能仅靠内存集合或Kafka生产者幂等覆盖MySQL与外部索引。
+
+Retry Topic承载重试通知，不是原地sleep的延迟队列。消费者持久保存not_before，调度器按数据库时间执行；重复投递不重算到期时间。初次加最多4次重试，基础退避为5/30/120/300秒，加0–20%正向抖动。任务构建预算与事件attempt分别计数，Outbox投递次数不占业务构建预算。当前epoch预算耗尽可终止首次参与该epoch的事件，并使用epoch_budget_exhausted说明原因。
+
+永久错误或预算耗尽会持久化终态、DLQ与结果Outbox；毒消息按来源位置隔离并只保留安全摘要。dead_lettered表示死信决定已持久化，不保证此时DLQ消息已送到Kafka。重试与死信都不提供未经验证的自动发布或自动重放入口。
+
+运行配置与请求步骤见[独立运行说明](docs/http/knowledge-runtime.md)及[HTTP请求材料](docs/http/knowledge-event-flow.http)。API不自动迁移或触发首次构建；没有active时搜索未就绪，已有合法empty时成功返回空。Worker负责bootstrap调度；API/Worker使用同一源库UUID及固定模型合同。
 
 ## 当前架构
 
@@ -1172,7 +1236,7 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - Redis 与 MySQL 不保证强一致，没有缓存补偿机制。
 - 普通咨询尚无跨请求幂等键；工单确认使用原操作 Key 幂等创建，同一 Run 的消息对另有唯一约束。
 - 角色变更影响后续检查，不会撤销已经通过检查的在途请求。
-- 已接入 RAG 与工具调用型 Agent；未接 Casbin、Kafka、Kubernetes。
+- 已接入 RAG 与工具调用型 Agent；未接 Casbin、Kubernetes。
 - 尚无正式性能压测结果。超时配置属于功能约束，不能作为 QPS、首段延迟、取消耗时或并发容量指标。
 - 当前日志提供模型阶段与 Service 阶段耗时，尚未形成首段延迟、取消传播耗时及业务成功率的指标统计。
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。
@@ -1180,6 +1244,8 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。
 
 ## Milvus 向量检索
+
+当前 cmd/api 使用 MySQL active 代际指定的物理 collection。以下别名发布、显式重建命令属于保留的旧 CLI 工作流，不是 Worker 更新 API 检索目标的步骤；修改旧别名不会切换 active。不要将旧 CLI 与 Worker 的发布状态混为一谈。
 
 ### Embedding 与相似度
 
@@ -1267,7 +1333,7 @@ Embedding 请求使用 truncate=false，超出输入或模型上下文限制时�
 
 ### 本地部署与健康检查
 
-Milvus 使用 compose.milvus.yaml，Compose 项目名为 go-ai-agent-milvus，
+Milvus 使用 compose.milvus.yaml，Compose 项目名为 video-support-agent-milvus，
 与 MySQL/Redis 及 Elasticsearch 的 Compose 项目独立。
 
 | 组件 | 当前配置 |
@@ -1430,7 +1496,7 @@ if ([string]::IsNullOrWhiteSpace($env:MILVUS_COLLECTION_ALIAS)) {
 }
 
 $runDirectory = Join-Path $env:TEMP (
-    'go-ai-agent-vector-rebuild-' + [guid]::NewGuid().ToString('N')
+    'video-support-agent-vector-rebuild-' + [guid]::NewGuid().ToString('N')
 )
 New-Item -ItemType Directory -Path $runDirectory | Out-Null
 $binary = Join-Path $runDirectory 'vector-reindex.exe'
@@ -1586,6 +1652,8 @@ invalid_vector_backend_response（502）；
 
 ## Elasticsearch 规则检索
 
+当前 cmd/api 关键词、向量及 Agent 混合检索通过 generationquery 绑定 MySQL active 目标对。以下 Alias 与显式重建说明适用于保留的旧 CLI/旧搜索入口；它们不能替代 Worker 的双目标验证与 MySQL 发布事务。
+
 ### 索引粒度、Mapping 与 Alias
 
 一个 ES 文档对应一个 KnowledgeChunk，ES `_id` 使用片段 ID 的规范十进制字符串。
@@ -1685,7 +1753,7 @@ ES 使用独立 Compose 项目，本地模式关闭认证与 TLS，仅绑定回�
 
 ### 本地部署与进程配置
 
-ES 使用独立 Compose 项目 go-ai-agent-es，不随原 MySQL/Redis 项目自动启动。
+ES 使用独立 Compose 项目 video-support-agent-es，不随原 MySQL/Redis 项目自动启动。
 以下命令在项目根目录执行；已运行的环境无需重复初始化索引。
 
 ```powershell
@@ -2135,9 +2203,15 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 ### 知识库已知限制与验收边界
 
 - 无管理前端、自动抓取、预约发布、旧版一键恢复或隐式回退。
-- 已提供独立 ES/Milvus 搜索及聊天混合 RAG；尚未接入 Kafka 或媒体处理，索引仍需显式重建。
+- 已提供独立 ES/Milvus 搜索及聊天混合 RAG；已接入 Kafka 异步索引更新，尚未接入媒体处理。
 - 全文较大时可能超过现有请求体上限；不自动放宽限制。
 - 没有正式吞吐量、延迟或容量结论。
 - 人工来源核验不能保证页面此后不变，文件哈希不能单独证明官方真实性。
 - HTTP 成功结果不能替代真实事务、并发锁、故障回滚和操作记录一致性测试。
 - 实现能力、隔离测试通过、真实规则演示和最终验收是不同结论，不能互相替代。
+
+## 知识库状态与观测入口
+
+知识库异步链路目前输出结构化日志，没有Prometheus /metrics。源Outbox发送确认、事件终态、全量任务状态与active代际分别表示不同阶段；管理员deliveries接口仅展示源Outbox。分区lag为offset位置差，不是索引完成度；epoch_gap不是秒数；build_duration_seconds不含最终发布事务。观测采集后等待15秒，最多输出32条最近attempt关联样本，不能将重复样本当作新增完成计数。
+
+采样失败标记available=false，不用零值掩盖；无提交offset时lag为null。当前未测量吞吐、P95、成功率或生产容量。详细字段、单位、时钟边界及故障处理见[知识库观测说明](docs/knowledge-observability.md)，HTTP状态及投递分页合同见[API文档](docs/api.md)。链路验收覆盖独立进程发布、下线与恢复；指标定义不等于吞吐或延迟基准测试结果。

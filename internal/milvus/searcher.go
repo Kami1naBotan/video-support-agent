@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"time"
+	"video-support-agent/internal/embedding"
 
 	"video-support-agent/internal/retrieval"
 )
@@ -31,6 +32,17 @@ func NewSearcher(embedder QueryEmbedder, client *Client, timeout time.Duration) 
 }
 
 func (s *Searcher) SearchCandidates(ctx context.Context, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
+	return s.searchCandidates(ctx, "", nil, query, opts, at)
+}
+
+func (s *Searcher) SearchCandidatesAt(ctx context.Context, target string, expected embedding.ModelIdentity, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
+	if !targetPattern.MatchString(target) {
+		return nil, ErrInput
+	}
+	return s.searchCandidates(ctx, target, &expected, query, opts, at)
+}
+
+func (s *Searcher) searchCandidates(ctx context.Context, target string, expected *embedding.ModelIdentity, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -41,9 +53,7 @@ func (s *Searcher) SearchCandidates(ctx context.Context, query string, opts retr
 	opCtx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 
-	prepared, err := PrepareQuery(
-		opCtx, query, opts, at, s.embedder,
-	)
+	prepared, err := PrepareQuery(opCtx, query, opts, at, s.embedder)
 	if contextErr := opCtx.Err(); contextErr != nil {
 		return nil, contextErr
 	}
@@ -51,7 +61,15 @@ func (s *Searcher) SearchCandidates(ctx context.Context, query string, opts retr
 		return nil, fmt.Errorf("prepare vector query: %w", err)
 	}
 
-	hits, err := s.client.SearchPrepared(opCtx, prepared)
+	var hits []SearchHit
+	if expected != nil {
+		if prepared.Identity != *expected {
+			return nil, embedding.ErrModelMismatch
+		}
+		hits, err = s.client.SearchPreparedAt(opCtx, target, prepared)
+	} else {
+		hits, err = s.client.SearchPrepared(opCtx, prepared)
+	}
 	if contextErr := opCtx.Err(); contextErr != nil {
 		return nil, contextErr
 	}

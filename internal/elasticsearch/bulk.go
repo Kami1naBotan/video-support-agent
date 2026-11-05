@@ -89,7 +89,8 @@ func (c *Client) BulkIndex(ctx context.Context, index string, documents []indexi
 		}
 
 		if status != http.StatusOK {
-			return fmt.Errorf("%w: bulk batch %d returned HTTP %d after %d completed batches", ErrStateUnknown, completedBatches+1, status, completedBatches)
+			return fmt.Errorf("%w: %w: bulk batch %d returned HTTP %d after %d completed batches",
+				ErrStateUnknown, statusErrorKind(status), completedBatches+1, status, completedBatches)
 		}
 
 		if err := verifyBulkResponse(
@@ -200,7 +201,7 @@ func (c *Client) requireUnaliasedIndex(ctx context.Context, index string) error 
 		return err
 	}
 	if status != http.StatusOK {
-		return fmt.Errorf("%w: bulk target lookup returned HTTP %d", ErrRejected, status)
+		return fmt.Errorf("%w: bulk target lookup returned HTTP %d", statusErrorKind(status), status)
 	}
 
 	var result map[string]struct {
@@ -231,6 +232,7 @@ func verifyBulkResponse(index string, expected []bulkDocument, body []byte) erro
 	}
 
 	failures := 0
+	permanentFailure := false
 	firstFailureID := ""
 	firstFailureStatus := 0
 
@@ -253,6 +255,9 @@ func verifyBulkResponse(index string, expected []bulkDocument, body []byte) erro
 			}
 
 			failures++
+			if !transientStatus(item.Status) {
+				permanentFailure = true
+			}
 			if firstFailureID == "" {
 				firstFailureID = item.ID
 				firstFailureStatus = item.Status
@@ -274,7 +279,11 @@ func verifyBulkResponse(index string, expected []bulkDocument, body []byte) erro
 		return invalidBulkResponse("bulk errors flag contradicts items")
 	}
 	if failures > 0 {
-		return fmt.Errorf("%w: %d bulk items failed; first ID %s, status %d", ErrRejected, failures, firstFailureID, firstFailureStatus)
+		kind := ErrUnavailable
+		if permanentFailure {
+			kind = ErrRejected
+		}
+		return fmt.Errorf("%w: %d bulk items failed; first ID %s, status %d", kind, failures, firstFailureID, firstFailureStatus)
 	}
 
 	return nil
