@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/cache"
 	"video-support-agent/internal/model"
@@ -200,6 +201,7 @@ func (s *MessageService) CreateAgent(ctx context.Context, input AgentMessageInpu
 	}
 
 	saveErr := s.saveAgentMessages(shared, input, userContent, result)
+	observability.RecordAgentMessageSave(shared, out.BusinessEffect, saveErr == nil)
 
 	return result, errors.Join(executeErr, deliveryErr, saveErr, total.Err())
 }

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -20,7 +21,18 @@ func NewChatModel(ctx context.Context, cfg config.LLMConfig) (*openai.ChatModel,
 	return newChatModel(ctx, cfg, nil)
 }
 
-func newChatModel(ctx context.Context, cfg config.LLMConfig, extraFields map[string]any) (*openai.ChatModel, error) {
+func newChatModel(ctx context.Context, cfg config.LLMConfig, extraFields map[string]any, httpClients ...*http.Client) (*openai.ChatModel, error) {
+	if len(httpClients) > 1 {
+		return nil, errors.New("at most one LLM HTTP client is allowed")
+	}
+
+	var httpClient *http.Client
+	if len(httpClients) == 1 {
+		httpClient = httpClients[0]
+		if httpClient == nil {
+			return nil, errors.New("LLM HTTP client is required")
+		}
+	}
 	baseURL := strings.TrimSpace(cfg.BaseURL)
 	modelName := strings.TrimSpace(cfg.Model)
 	apiKey := strings.TrimSpace(cfg.APIKey)
@@ -56,6 +68,7 @@ func newChatModel(ctx context.Context, cfg config.LLMConfig, extraFields map[str
 		Model:       modelName,
 		APIKey:      apiKey,
 		Timeout:     timeout,
+		HTTPClient:  httpClient,
 		MaxTokens:   &outputLimit,
 		ExtraFields: extraFields,
 	})

@@ -83,7 +83,7 @@ func fixtureToken(t *testing.T, payload string) string {
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func TestDay11SignerContract(t *testing.T) {
+func TestSignerContract(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	t.Run("independent_wire", func(t *testing.T) {
@@ -114,7 +114,7 @@ func TestDay11SignerContract(t *testing.T) {
 	})
 }
 
-func TestDay11SignerConfiguration(t *testing.T) {
+func TestSignerConfiguration(t *testing.T) {
 	cfg, at, _ := signerFixture()
 	cases := []struct {
 		name  string
@@ -180,7 +180,7 @@ func TestDay11SignerConfiguration(t *testing.T) {
 	})
 }
 
-func TestDay11SignerIssueTime(t *testing.T) {
+func TestSignerIssueTime(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	cases := []struct {
@@ -215,7 +215,7 @@ func TestDay11SignerIssueTime(t *testing.T) {
 	}
 }
 
-func TestDay11SignerVerifyTime(t *testing.T) {
+func TestSignerVerifyTime(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	now := at
 	s := mustSigner(t, cfg, func() time.Time { return now })
@@ -247,7 +247,7 @@ func TestDay11SignerVerifyTime(t *testing.T) {
 	}
 }
 
-func TestDay11SignerBinding(t *testing.T) {
+func TestSignerBinding(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	token := mustIssue(t, s, binding, at)
@@ -276,7 +276,7 @@ func TestDay11SignerBinding(t *testing.T) {
 	}
 }
 
-func TestDay11SignerInvalidBinding(t *testing.T) {
+func TestSignerInvalidBinding(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	token := mustIssue(t, s, binding, at)
@@ -313,7 +313,7 @@ func TestDay11SignerInvalidBinding(t *testing.T) {
 	}
 }
 
-func TestDay11SignerScope(t *testing.T) {
+func TestSignerScope(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	token := mustIssue(t, mustSigner(t, cfg, func() time.Time { return at }), binding, at)
 	cases := []struct {
@@ -340,7 +340,7 @@ func TestDay11SignerScope(t *testing.T) {
 	}
 }
 
-func TestDay11SignerEnvelope(t *testing.T) {
+func TestSignerEnvelope(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	token := mustIssue(t, s, binding, at)
@@ -369,7 +369,7 @@ func TestDay11SignerEnvelope(t *testing.T) {
 	}
 }
 
-func TestDay11SignerClaims(t *testing.T) {
+func TestSignerClaims(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	s := mustSigner(t, cfg, func() time.Time { return at })
 	payload := fixturePayload(at)
@@ -399,7 +399,7 @@ func TestDay11SignerClaims(t *testing.T) {
 	}
 }
 
-func TestDay11SignerContext(t *testing.T) {
+func TestSignerContext(t *testing.T) {
 	cfg, at, binding := signerFixture()
 	valid := mustSigner(t, cfg, func() time.Time { return at })
 	token := mustIssue(t, valid, binding, at)
@@ -468,7 +468,7 @@ func TestDay11SignerContext(t *testing.T) {
 	})
 }
 
-func TestDay11SignerConfigLoad(t *testing.T) {
+func TestSignerConfigLoad(t *testing.T) {
 	cfg, _, _ := signerFixture()
 	t.Setenv("JWT_SECRET", "test-only-login-secret")
 	t.Run("defaults_no_key", func(t *testing.T) {

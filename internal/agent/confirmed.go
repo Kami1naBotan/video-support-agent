@@ -387,7 +387,15 @@ func (e *ConfirmedExecutor) Confirm(ctx context.Context, request service.AgentCo
 		return out, err
 	}
 
-	_, err = registry.InvokeConfirmed(budget.work)
+	invokeCtx := tools.WithEvaluationCall(
+		budget.work,
+		tools.EvaluationCallIdentity{
+			RunID:    out.RunID,
+			CallID:   call.ID,
+			Sequence: call.Sequence,
+		},
+	)
+	_, err = registry.InvokeConfirmed(invokeCtx)
 
 	out.Ticket, out.BusinessEffect = registry.BusinessResult()
 	return out, err

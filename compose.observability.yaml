@@ -1,0 +1,56 @@
+name: video-support-agent-observability
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    network_mode: host
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=3d
+      - --web.listen-address=127.0.0.1:9090
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: "no"
+
+  grafana:
+    image: grafana/grafana:11.6.0
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3000"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    restart: "no"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    network_mode: host
+    environment:
+      SPAN_STORAGE_TYPE: memory
+      COLLECTOR_OTLP_ENABLED: "true"
+    command:
+      - --collector.otlp.http.host-port=127.0.0.1:4318
+      - --collector.otlp.grpc.host-port=127.0.0.1:4317
+      - --collector.http-server.host-port=127.0.0.1:14268
+      - --collector.grpc-server.host-port=127.0.0.1:14250
+      - --query.http-server.host-port=127.0.0.1:16686
+      - --admin.http.host-port=127.0.0.1:14269
+      - --http-server.host-port=127.0.0.1:5778
+      - --processor.jaeger-compact.server-host-port=127.0.0.1:6831
+      - --processor.jaeger-binary.server-host-port=127.0.0.1:6832
+      - --processor.zipkin-compact.server-host-port=127.0.0.1:5775
+      - --memory.max-traces=10000
+    restart: "no"
+
+volumes:
+  prometheus_data:
+  grafana_data:

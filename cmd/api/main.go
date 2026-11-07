@@ -11,18 +11,19 @@ import (
 	"time"
 	"video-support-agent/internal/auth"
 	"video-support-agent/internal/cache"
+	"video-support-agent/internal/config"
 	"video-support-agent/internal/confirmation"
+	"video-support-agent/internal/database"
 	"video-support-agent/internal/elasticsearch"
 	"video-support-agent/internal/embedding"
 	"video-support-agent/internal/generationquery"
 	"video-support-agent/internal/llm"
+	"video-support-agent/internal/logger"
+	"video-support-agent/internal/middleware"
 	"video-support-agent/internal/milvus"
+	"video-support-agent/internal/observability"
 	"video-support-agent/internal/repository"
 	"video-support-agent/internal/retrieval"
-
-	"video-support-agent/internal/config"
-	"video-support-agent/internal/database"
-	"video-support-agent/internal/logger"
 	"video-support-agent/internal/router"
 
 	"github.com/gin-gonic/gin"
@@ -45,9 +46,7 @@ func main() {
 func run() error {
 	cfg := config.Load()
 
-	appealSigner, err := confirmation.NewAppealSigner(
-		cfg.AppealConfirmation,
-	)
+	appealSigner, err := confirmation.NewAppealSigner(cfg.AppealConfirmation)
 	if err != nil {
 		return errors.New("initialize appeal confirmation failed; check APPEAL_CONFIRMATION_KEY_BASE64, APPEAL_CONFIRMATION_ISSUER and APPEAL_CONFIRMATION_AUDIENCE")
 	}
@@ -81,6 +80,26 @@ func run() error {
 	}
 	defer func() { _ = appLogger.Sync() }()
 
+	obs, err := observability.New(context.Background(), cfg.Observability, "api")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := obs.Shutdown(context.Background()); err != nil {
+			appLogger.Warn("observability shutdown incomplete")
+		}
+	}()
+
+	metricsServer, err := observability.StartMetrics(obs)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := metricsServer.Shutdown(context.Background()); err != nil {
+			appLogger.Warn("metrics shutdown incomplete")
+		}
+	}()
+
 	jwtTTL, err := time.ParseDuration(cfg.JWT.TTL)
 	if err != nil {
 		return errors.New("initialize JWT_TTL failed")
@@ -111,7 +130,12 @@ func run() error {
 
 	appLogger.Info("knowledge startup checks passed", zap.Bool("active_generation_ready", indexReady))
 
-	searchClient, err := elasticsearch.NewClient(cfg.Elasticsearch)
+	esObserver, err := observability.NewQueryObserver(obs, "elasticsearch")
+	if err != nil {
+		return err
+	}
+
+	searchClient, err := elasticsearch.NewClient(cfg.Elasticsearch, esObserver)
 	if err != nil {
 		return errors.New("initialize Elasticsearch client failed")
 	}
@@ -130,7 +154,12 @@ func run() error {
 	}
 	defer embeddingClient.Close()
 
-	vectorClient, err := milvus.NewClient(cfg.Milvus)
+	milvusObserver, err := observability.NewQueryObserver(obs, "milvus")
+	if err != nil {
+		return err
+	}
+
+	vectorClient, err := milvus.NewClient(cfg.Milvus, milvusObserver)
 	if err != nil {
 		return errors.New("initialize Milvus client failed")
 	}
@@ -186,25 +215,37 @@ func run() error {
 		return errors.New("initialize authentication rate limiter failed")
 	}
 
-	agentModels, err := llm.NewAgentModels(context.Background(), cfg.LLM)
+	llmObserver, err := observability.NewLLMObserver(obs)
+	if err != nil {
+		return err
+	}
+
+	agentModels, err := llm.NewAgentModels(context.Background(), cfg.LLM, llmObserver)
 	if err != nil {
 		return errors.New("initialize Agent models failed; check LLM_BASE_URL, LLM_MODEL, LLM_API_KEY and LLM_TIMEOUT (0 < timeout <= 30s)")
 	}
 
-	loggedHybrid, err := retrieval.NewLoggedHybridRetriever(
-		retrievers.Hybrid,
-		appLogger,
-	)
+	loggedHybrid, err := retrieval.NewLoggedHybridRetriever(retrievers.Hybrid, appLogger)
 	if err != nil {
 		return errors.New("initialize hybrid retrieval logging failed")
 	}
 
-	messageHandler, err := newAgentMessageHandler(db, contextStore, loggedHybrid, agentModels, appealSigner, appLogger)
+	executionObserver, err := observability.NewExecutionObserver(obs)
+	if err != nil {
+		return err
+	}
+
+	messageHandler, err := newAgentMessageHandler(db, contextStore, loggedHybrid, agentModels, appealSigner, appLogger, executionObserver)
 	if err != nil {
 		return err
 	}
 
 	appLogger.Info("Agent chat dependencies initialized")
+
+	httpObservation, err := middleware.NewHTTPObservation(obs)
+	if err != nil {
+		return err
+	}
 
 	r := router.NewWithMessageHandler(
 		cfg,
@@ -218,6 +259,7 @@ func run() error {
 		retrievers.Keyword,
 		retrievers.Vector,
 		messageHandler,
+		httpObservation,
 	)
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration",
@@ -245,12 +287,20 @@ func run() error {
 		serverErrors <- server.ListenAndServe()
 	}()
 
+	var stopReason error
+
 	select {
 	case err := <-serverErrors:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return errors.New("HTTP server failed; check listen address and port")
+			stopReason = errors.New("HTTP server failed; check listen address and port")
 		}
-		return nil
+		if err := shutdownHTTPServer(server, shutdownTimeout); err != nil {
+			return errors.Join(stopReason, err)
+		}
+		return stopReason
+	case err := <-metricsServer.Errors():
+		stopReason = err
+		stop()
 	case <-signalCtx.Done():
 		stop()
 	}
@@ -258,7 +308,7 @@ func run() error {
 	appLogger.Info("shutting down API server")
 
 	if err := shutdownHTTPServer(server, shutdownTimeout); err != nil {
-		return err
+		return errors.Join(stopReason, err)
 	}
 
 	if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -266,5 +316,5 @@ func run() error {
 	}
 
 	appLogger.Info("API server stopped")
-	return nil
+	return stopReason
 }

@@ -761,6 +761,26 @@ done 携带保存后的最终结果；终态事件可能因断线无法送达，
 刷新不复活确认卡片，也不自动重发请求。若请求发出后尚未收到 Run ID 就断线，
 当前按 Run 查询接口不能精确定位该次执行，页面保留未定位标记并提示人工核对。
 
+### 观测与知识读取路径
+
+```mermaid
+flowchart LR
+    Client["客户端"] --> API["Gin：JWT / Redis限流 / 角色检查"]
+    API --> Read["Knowledge Handler / Service"]
+    Read --> DB[("MySQL：当前版本与条款只读事务")]
+    API -.-> Obs["API Runtime：指标与span"]
+    Worker["Worker：publish / receive / build"] -.-> WObs["Worker Runtime：独立Registry与span"]
+    Prom["Prometheus"] -->|"抓取 /metrics"| Obs
+    Prom -->|"抓取 /metrics"| WObs
+    Obs -->|"OTLP HTTP"| Jaeger["Jaeger"]
+    WObs -->|"OTLP HTTP"| Jaeger
+    Grafana["Grafana"] -->|"查询"| Prom
+```
+
+虚线表示观测接线，不是业务数据流。当前版本详情直接读取MySQL，不经过LLM、ES或Milvus。
+API和Worker进程分别初始化观测；Kafka状态日志不等于Prometheus指标。
+本地Compose使用host networking，Docker Desktop需启用对应功能。
+
 ### 保留的独立 RAG 路径
 
 下图描述仍保留的 rag.Responder 与旧聊天构造入口，不是当前 cmd/api 的默认 Agent 路径。
@@ -1237,7 +1257,7 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - 普通咨询尚无跨请求幂等键；工单确认使用原操作 Key 幂等创建，同一 Run 的消息对另有唯一约束。
 - 角色变更影响后续检查，不会撤销已经通过检查的在途请求。
 - 已接入 RAG 与工具调用型 Agent；未接 Casbin、Kubernetes。
-- 尚无正式性能压测结果。超时配置属于功能约束，不能作为 QPS、首段延迟、取消耗时或并发容量指标。
+- 已有本地知识读取的有限负载样本（见文末）；尚无聊天、SSE、检索或生产容量结论。超时配置不是性能指标。
 - 当前日志提供模型阶段与 Service 阶段耗时，尚未形成首段延迟、取消传播耗时及业务成功率的指标统计。
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。
 - 优雅关闭最多等待 60 秒；超时后强制关闭连接。
@@ -2205,13 +2225,30 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 - 无管理前端、自动抓取、预约发布、旧版一键恢复或隐式回退。
 - 已提供独立 ES/Milvus 搜索及聊天混合 RAG；已接入 Kafka 异步索引更新，尚未接入媒体处理。
 - 全文较大时可能超过现有请求体上限；不自动放宽限制。
-- 没有正式吞吐量、延迟或容量结论。
+- 已有本地知识读取负载样本；尚无生产吞吐上限、延迟SLO或容量结论。
 - 人工来源核验不能保证页面此后不变，文件哈希不能单独证明官方真实性。
 - HTTP 成功结果不能替代真实事务、并发锁、故障回滚和操作记录一致性测试。
 - 实现能力、隔离测试通过、真实规则演示和最终验收是不同结论，不能互相替代。
 
 ## 知识库状态与观测入口
 
-知识库异步链路目前输出结构化日志，没有Prometheus /metrics。源Outbox发送确认、事件终态、全量任务状态与active代际分别表示不同阶段；管理员deliveries接口仅展示源Outbox。分区lag为offset位置差，不是索引完成度；epoch_gap不是秒数；build_duration_seconds不含最终发布事务。观测采集后等待15秒，最多输出32条最近attempt关联样本，不能将重复样本当作新增完成计数。
+知识库异步链路保留结构化状态日志，API/Worker已接入可选Prometheus指标与OTLP链路。OBS_ENABLED默认false；启用后/metrics使用独立回环监听，API建议9464、Worker显式配置9465。源Outbox发送确认、事件终态、全量任务状态与active代际分别表示不同阶段；管理员deliveries接口仅展示源Outbox。分区lag为offset位置差，不是索引完成度；epoch_gap不是秒数；build_duration_seconds不含最终发布事务。观测采集后等待15秒，最多输出32条最近attempt关联样本，不能将重复样本当作新增完成计数。
 
-采样失败标记available=false，不用零值掩盖；无提交offset时lag为null。当前未测量吞吐、P95、成功率或生产容量。详细字段、单位、时钟边界及故障处理见[知识库观测说明](docs/knowledge-observability.md)，HTTP状态及投递分页合同见[API文档](docs/api.md)。链路验收覆盖独立进程发布、下线与恢复；指标定义不等于吞吐或延迟基准测试结果。
+采样失败标记available=false，不用零值掩盖；无提交offset时lag为null。已测量下述知识读取样本；异步构建吞吐、端到端P95及生产容量仍未测定。详细字段、单位、时钟边界及故障处理见[知识库观测说明](docs/knowledge-observability.md)，HTTP状态及投递分页合同见[API文档](docs/api.md)。链路验收覆盖独立进程发布、下线与恢复；指标定义不等于吞吐或延迟基准测试结果。
+
+## 本地知识读取负载样本
+
+2026-11-07，在Windows amd64、Go1.27.1、32逻辑CPU环境，用k6 0.57.0以5请求/秒持续60秒读取GET /api/v1/knowledge/documents/:id/current。10个合成用户轮转，保留生产JWT、角色检查和60次/分钟/用户的Redis限流；独立MySQL只有1文档/1版本/1短条款。另1用户预热10次，全部通过且不计入正式样本。
+
+|指标|实测值|
+|---|---|
+|请求与内容校验|301/301通过|
+|HTTP失败率／业务失败率|0%／0%|
+|丢弃迭代|0|
+|成功请求平均|8.2848 ms|
+|成功请求P95／P99|10.6901／12.1915 ms|
+
+使用生产路由的原生httptest HTTP进程、隔离MySQL/Redis和Docker host networking运行k6；不包含cmd/api启动或登录。观测导出关闭、访问日志为nop，没有race插桩。每次请求核对文档、版本、条款ID及完整合成内容。
+
+延迟为客户端发送、等待、接收之和，不含建连耗时；301是实际样本数。本次全部请求成功，成功请求与全部HTTP延迟一致。小样本P95/P99不构成生产SLO，未测定瓶颈或最大容量，也不能外推LLM、SSE、检索或大语料性能。更多测量语义见[观测与指标说明](docs/knowledge-observability.md)。
+

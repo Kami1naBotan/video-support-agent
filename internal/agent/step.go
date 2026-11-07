@@ -65,7 +65,15 @@ func (s *chatSession) step(modelID, name, canonical string) (result string, stop
 			s.latestEvidence = ""
 		}
 
-		result, err = s.registry.Invoke(s.budget.work, name, canonical)
+		invokeCtx := tools.WithEvaluationCall(
+			s.budget.work,
+			tools.EvaluationCallIdentity{
+				RunID:    s.out.RunID,
+				CallID:   started.ID,
+				Sequence: started.Sequence,
+			},
+		)
+		result, err = s.registry.Invoke(invokeCtx, name, canonical)
 
 		if err == nil {
 			switch {

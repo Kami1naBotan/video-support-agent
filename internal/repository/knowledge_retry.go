@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strconv"
 	"time"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
@@ -230,6 +231,7 @@ func persistRetryReceiptAndAttempt(tx *gorm.DB, control model.KnowledgeIndexCont
 		EventID:      event.EventID,
 		Attempt:      message.NextAttempt,
 		SourceSHA256: event.PayloadSHA256,
+		TraceParent:  observability.CaptureTraceParent(tx.Statement.Context),
 		Topic:        delivery.Topic,
 		Partition:    delivery.Partition,
 		Offset:       delivery.Offset,

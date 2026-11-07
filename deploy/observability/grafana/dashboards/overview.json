@@ -1,0 +1,195 @@
+{
+  "uid": "video-support-agent-overview",
+  "title": "Go AI Agent Observability",
+  "schemaVersion": 40,
+  "version": 1,
+  "editable": false,
+  "timezone": "browser",
+  "refresh": "15s",
+  "time": {"from": "now-30m", "to": "now"},
+  "tags": ["video-support-agent"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Metrics scrape availability",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 5},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=~\"video-support-agent-(api|worker)\"}",
+          "legendFormat": "{{job}} {{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "HTTP P95 / P99 — full request including SSE",
+      "description": "Bucket estimates over 5m. Grouped by route, method and status class; not time to first token.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 5, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, route, method, status_class) (rate(http_server_request_duration_seconds_bucket{job=\"video-support-agent-api\"}[5m])))",
+          "legendFormat": "P95 {{method}} {{route}} {{status_class}}"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.99, sum by (le, route, method, status_class) (rate(http_server_request_duration_seconds_bucket{job=\"video-support-agent-api\"}[5m])))",
+          "legendFormat": "P99 {{method}} {{route}} {{status_class}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "LLM P95 — transport and response consumption",
+      "description": "Separate planner/answer and outcome. closed is early response-body closure, not guaranteed semantic success.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 5, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, role, outcome) (rate(llm_call_duration_seconds_bucket{job=\"video-support-agent-api\"}[5m])))",
+          "legendFormat": "{{role}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Elasticsearch query P95",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 13, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(es_query_duration_seconds_bucket{job=\"video-support-agent-api\"}[5m])))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Milvus query P95 — excludes embedding",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 13, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(milvus_query_duration_seconds_bucket{job=\"video-support-agent-api\"}[5m])))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Actual tool calls per second",
+      "description": "Counts completed actual invocations. chat creation proposals are rejected pending confirmation.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (tool, phase, outcome) (rate(tool_calls_total{job=\"video-support-agent-api\"}[5m]))",
+          "legendFormat": "{{tool}} {{phase}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Agent failures and cancellations per second",
+      "description": "Cancellations are separate. Normal clarify/handoff does not increment failures.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (phase, reason) (rate(agent_failures_total{job=\"video-support-agent-api\"}[5m]))",
+          "legendFormat": "failure {{phase}} {{reason}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (phase) (rate(agent_cancellations_total{job=\"video-support-agent-api\"}[5m]))",
+          "legendFormat": "cancellation {{phase}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Kafka lag — valid partitions only",
+      "description": "Missing means unavailable, not zero. Zero does not imply index publication.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 27, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kafka_consumer_lag{job=\"video-support-agent-worker\"} and on(job, instance, group, topic, partition) (kafka_consumer_lag_available{job=\"video-support-agent-worker\"} == 1) and on(job, instance) (up{job=\"video-support-agent-worker\"} == 1)",
+          "legendFormat": "{{group}} {{topic}} p{{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Kafka lag availability",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 27, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"min": 0, "max": 1}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kafka_consumer_lag_available{job=\"video-support-agent-worker\"} * on(job, instance) group_left up{job=\"video-support-agent-worker\"}",
+          "legendFormat": "{{group}} {{topic}} p{{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Seconds since last valid lag sample",
+      "description": "Never-successful partitions are omitted; check availability alongside this panel.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 0, "y": 34, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(time() - kafka_consumer_lag_last_success_timestamp_seconds{job=\"video-support-agent-worker\"}) and on(job, instance, group, topic, partition) (kafka_consumer_lag_last_success_timestamp_seconds{job=\"video-support-agent-worker\"} > 0) and on(job, instance) (up{job=\"video-support-agent-worker\"} == 1)",
+          "legendFormat": "{{group}} {{topic}} p{{partition}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "HTTP observations in 5m — estimated increase",
+      "description": "Prometheus increase is extrapolated and may be fractional; it is not an exact evaluation sample count.",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "gridPos": {"x": 12, "y": 34, "w": 12, "h": 7},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (route, method, status_class) (increase(http_server_request_duration_seconds_count{job=\"video-support-agent-api\"}[5m]))",
+          "legendFormat": "{{method}} {{route}} {{status_class}}"
+        }
+      ]
+    }
+  ]
+}

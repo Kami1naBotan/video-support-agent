@@ -3,6 +3,7 @@ package eventbus
 import (
 	"context"
 	"errors"
+	"video-support-agent/internal/observability"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -49,6 +50,13 @@ func (c *Client) Publish(ctx context.Context, input Record) (Receipt, error) {
 				Value: []byte(input.TraceID),
 			},
 		},
+	}
+
+	if parent := observability.NormalizeTraceParent(input.TraceParent); parent != "" {
+		record.Headers = append(record.Headers, kgo.RecordHeader{
+			Key:   "traceparent",
+			Value: []byte(parent),
+		})
 	}
 
 	type outcome struct {

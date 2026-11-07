@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strconv"
 	"time"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
@@ -150,6 +151,7 @@ func acceptSourceTransaction(tx *gorm.DB, source knowledgeevent.Source, delivery
 		VersionID:           versionID,
 		PublicationRevision: publicationRevision,
 		TraceID:             source.TraceID,
+		TraceParent:         observability.CaptureTraceParent(tx.Statement.Context),
 		Payload:             bytes.Clone(delivery.Value),
 		PayloadSHA256:       hash,
 		TargetEpoch:         targetEpoch,
@@ -168,6 +170,7 @@ func acceptSourceTransaction(tx *gorm.DB, source knowledgeevent.Source, delivery
 		EventID:      source.EventID,
 		Attempt:      1,
 		SourceSHA256: hash,
+		TraceParent:  observability.CaptureTraceParent(tx.Statement.Context),
 		Topic:        delivery.Topic,
 		Partition:    delivery.Partition,
 		Offset:       delivery.Offset,

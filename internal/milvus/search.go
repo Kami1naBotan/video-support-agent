@@ -39,7 +39,7 @@ func (c *Client) SearchPreparedAt(ctx context.Context, target string, query *Pre
 	return c.searchPrepared(ctx, target, false, query)
 }
 
-func (c *Client) searchPrepared(ctx context.Context, target string, resolveAlias bool, query *PreparedQuery) ([]SearchHit, error) {
+func (c *Client) searchPrepared(ctx context.Context, target string, resolveAlias bool, query *PreparedQuery) (result []SearchHit, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -79,6 +79,11 @@ func (c *Client) searchPrepared(ctx context.Context, target string, resolveAlias
 			outputFields = append(outputFields, field.Name)
 		}
 	}
+
+	ctx, finish := c.queryObserver.Start(ctx)
+	defer func() {
+		finish(resultErr)
+	}()
 
 	data, err := c.request(ctx, "entities/search", map[string]any{
 		"collectionName":   target,

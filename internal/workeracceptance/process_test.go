@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/propagation"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -97,9 +98,14 @@ func TestWorkerProcessKafka(t *testing.T) {
 			docker(t, "unpause", b)
 		}
 	}()
-	must(t, repo.IsolatePoison(context.Background(), eventbus.Delivery{Topic: eventbus.TopicDocumentEvents, Partition: 0, Offset: 999, Value: []byte("synthetic crash trigger")}, "source_record_invalid"))
+	const persistedParent = "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01"
+	traceContext := (propagation.TraceContext{}).Extract(context.Background(), propagation.MapCarrier{"traceparent": persistedParent})
+	must(t, repo.IsolatePoison(traceContext, eventbus.Delivery{Topic: eventbus.TopicDocumentEvents, Partition: 0, Offset: 999, Value: []byte("synthetic crash trigger")}, "source_record_invalid"))
 	var row model.EventOutbox
 	must(t, db.Take(&row).Error)
+	if row.TraceParent != persistedParent {
+		t.Fatal("outbox did not persist source trace parent")
+	}
 	await(t, "inflight relay", func() bool { must(t, db.First(&row, row.ID).Error); return row.Status == model.OutboxSending })
 	docker(t, "kill", "--signal", "KILL", w)
 	exited(t, w, "137")
@@ -114,6 +120,9 @@ func TestWorkerProcessKafka(t *testing.T) {
 	await(t, "outbox recovered", func() bool { must(t, db.First(&row, row.ID).Error); return row.Status == model.OutboxSent })
 	if row.Attempts < 2 {
 		t.Fatal("lease was not recovered")
+	}
+	if row.TraceParent != persistedParent {
+		t.Fatal("process restart changed persisted trace parent")
 	}
 	wireRows(t, cfg.Brokers, []model.EventOutbox{row})
 	bad := &kgo.Record{Topic: eventbus.TopicDocumentEvents, Value: []byte("sensitive-process-canary"), Headers: []kgo.RecordHeader{{Key: "secret", Value: []byte("private-process-header")}}}

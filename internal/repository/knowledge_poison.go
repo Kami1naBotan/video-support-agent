@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
@@ -112,6 +113,7 @@ func createPoisonIsolation(tx *gorm.DB, positionID string, notice knowledgeevent
 		Topic:         eventbus.TopicIndexDLQ,
 		MessageKey:    notice.Key(),
 		TraceID:       notice.TraceID,
+		TraceParent:   observability.CaptureTraceParent(tx.Statement.Context),
 		Payload:       payload,
 		PayloadSHA256: hex.EncodeToString(digest[:]),
 		Status:        model.OutboxPending,

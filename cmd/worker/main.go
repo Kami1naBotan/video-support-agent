@@ -31,7 +31,7 @@ func mainExit() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := runWorker(ctx, cfg, log); err != nil {
+	if err := runObservedWorker(ctx, cfg, log); err != nil {
 		log.Error("worker stopped with error", zap.String("code", err.Error()))
 		return 1
 	}
@@ -40,6 +40,6 @@ func mainExit() int {
 	return 0
 }
 
-func runWorker(ctx context.Context, cfg config.Config, log *zap.Logger) error {
-	return runKnowledgeWorker(ctx, cfg, log)
+func runWorker(ctx context.Context, cfg config.Config, log *zap.Logger, observers ...workerObservation) error {
+	return runKnowledgeWorker(ctx, cfg, log, observers...)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 	"video-support-agent/internal/knowledgefailure"
+	"video-support-agent/internal/observability"
 
 	"go.uber.org/zap"
 )
@@ -22,16 +23,28 @@ type Builder interface {
 }
 
 type Runtime struct {
-	store   RuntimeStore
-	builder Builder
-	log     *zap.Logger
+	store    RuntimeStore
+	builder  Builder
+	log      *zap.Logger
+	observer *observability.AsyncObserver
 }
 
-func NewRuntime(store RuntimeStore, builder Builder, log *zap.Logger) (*Runtime, error) {
-	if store == nil || builder == nil || log == nil {
+func NewRuntime(store RuntimeStore, builder Builder, log *zap.Logger, observers ...*observability.AsyncObserver) (*Runtime, error) {
+	if store == nil || builder == nil || log == nil || len(observers) > 1 {
 		return nil, ErrBuildConfig
 	}
-	return &Runtime{store: store, builder: builder, log: log}, nil
+
+	var observer *observability.AsyncObserver
+	if len(observers) == 1 {
+		observer = observers[0]
+	}
+
+	return &Runtime{
+		store:    store,
+		builder:  builder,
+		log:      log,
+		observer: observer,
+	}, nil
 }
 
 func runtimeWait(ctx context.Context, duration time.Duration) error {
@@ -85,11 +98,30 @@ func (r *Runtime) RunBuilds(ctx context.Context) error {
 }
 
 func (r *Runtime) runClaim(ctx context.Context, claim BuildClaim) error {
+	ctx, finishObservation := r.startBuildObservation(ctx, claim)
+	observationOutcome := "panic"
+	defer func() {
+		finishObservation(observationOutcome)
+	}()
+
 	attemptCtx, cancel := context.WithTimeout(ctx, BuildTimeout)
 	defer cancel()
 
 	started := time.Now()
 	verified, err := r.builder.Build(attemptCtx, claim)
+
+	observationOutcome = "failed"
+	switch {
+	case errors.Is(err, context.Canceled):
+		observationOutcome = "cancelled"
+	case errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, ErrDualTimeout):
+		observationOutcome = "timed_out"
+	case errors.Is(err, ErrBuildObsolete):
+		observationOutcome = "obsolete"
+	case errors.Is(err, ErrBuildLeaseLost):
+		observationOutcome = "lease_lost"
+	}
 
 	code := "verified"
 	switch {
@@ -119,9 +151,15 @@ func (r *Runtime) runClaim(ctx context.Context, claim BuildClaim) error {
 
 	if err := r.store.Publish(attemptCtx, verified); err != nil {
 		if ctx.Err() != nil {
+			observationOutcome = "cancelled"
 			return ctx.Err()
 		}
 		if errors.Is(err, ErrBuildObsolete) || errors.Is(err, ErrBuildLeaseLost) {
+			observationOutcome = "obsolete"
+			if errors.Is(err, ErrBuildLeaseLost) {
+				observationOutcome = "lease_lost"
+			}
+
 			r.log.Info("generation not selected",
 				zap.String("generation_id", claim.GenerationID),
 				zap.String("code", "generation_no_longer_owned"))
@@ -133,6 +171,8 @@ func (r *Runtime) runClaim(ctx context.Context, claim BuildClaim) error {
 			zap.String("code", "publication_unconfirmed"))
 		return ErrBuildStore
 	}
+
+	observationOutcome = "published"
 
 	r.log.Info("generation published",
 		zap.String("generation_id", claim.GenerationID),

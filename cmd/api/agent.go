@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/agent"
 	"video-support-agent/internal/confirmation"
@@ -16,7 +17,24 @@ import (
 	"gorm.io/gorm"
 )
 
-func newAgentMessageHandler(db *gorm.DB, contexts service.MessageContextStore, retriever retrieval.HybridRetriever, models llm.AgentModels, signer *confirmation.AppealSigner, appLogger *zap.Logger) (*handler.MessageHandler, error) {
+func newAgentMessageHandler(
+	db *gorm.DB,
+	contexts service.MessageContextStore,
+	retriever retrieval.HybridRetriever,
+	models llm.AgentModels,
+	signer *confirmation.AppealSigner,
+	appLogger *zap.Logger,
+	observers ...*observability.ExecutionObserver,
+) (*handler.MessageHandler, error) {
+	if len(observers) > 1 {
+		return nil, errors.New("at most one execution observer is allowed")
+	}
+
+	var observer *observability.ExecutionObserver
+	if len(observers) == 1 {
+		observer = observers[0]
+	}
+
 	if db == nil || signer == nil {
 		return nil, errors.New("initialize Agent dependencies failed")
 	}
@@ -54,6 +72,7 @@ func newAgentMessageHandler(db *gorm.DB, contexts service.MessageContextStore, r
 		Retriever:     retriever,
 		Knowledge:     knowledgeService,
 		Appeals:       appealService,
+		Observation:   observer,
 	}
 
 	executor, err := agent.NewExecutor(deps, auditRepository, appealService, models)
@@ -61,12 +80,17 @@ func newAgentMessageHandler(db *gorm.DB, contexts service.MessageContextStore, r
 		return nil, errors.New("initialize Agent executor failed")
 	}
 
-	messageService, err := service.NewAgentMessageService(messages, conversations, contexts, appLogger, executor, auditRepository)
+	observedExecutor, err := agent.ObserveExecutor(executor, observer)
+	if err != nil {
+		return nil, errors.New("initialize Agent observation failed")
+	}
+
+	messageService, err := service.NewAgentMessageService(messages, conversations, contexts, appLogger, observedExecutor, auditRepository)
 	if err != nil {
 		return nil, errors.New("initialize Agent message service failed")
 	}
 
-	readService, err := service.NewAgentReadService(conversations, messages, auditRepository, executor)
+	readService, err := service.NewAgentReadService(conversations, messages, auditRepository, observedExecutor)
 	if err != nil {
 		return nil, errors.New("initialize Agent read service failed")
 	}

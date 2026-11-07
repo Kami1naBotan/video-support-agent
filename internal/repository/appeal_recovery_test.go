@@ -12,7 +12,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 )
 
-func TestDay11StorageClassification(t *testing.T) {
+func TestStorageClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		number    uint16
@@ -74,7 +74,7 @@ func TestDay11StorageClassification(t *testing.T) {
 	})
 }
 
-func TestDay11StorageAwait(t *testing.T) {
+func TestStorageAwait(t *testing.T) {
 	t.Run("known_success", func(t *testing.T) {
 		done := make(chan error, 1)
 		done <- nil

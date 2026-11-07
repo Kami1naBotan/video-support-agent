@@ -25,11 +25,12 @@ var (
 )
 
 type Record struct {
-	Topic     string
-	Key       string
-	MessageID string
-	TraceID   string
-	Value     []byte
+	Topic       string
+	Key         string
+	MessageID   string
+	TraceID     string
+	TraceParent string
+	Value       []byte
 }
 
 func (r Record) Validate() error {

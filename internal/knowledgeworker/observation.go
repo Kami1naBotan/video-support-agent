@@ -57,10 +57,16 @@ type LagTarget struct {
 	Topic string
 }
 
-func RunObservations(ctx context.Context, store ObservationStore, broker LagReader, log *zap.Logger, targets []LagTarget) error {
-	if store == nil || broker == nil || log == nil || len(targets) != 2 {
+func RunObservations(ctx context.Context, store ObservationStore, broker LagReader, log *zap.Logger, targets []LagTarget, metrics ...*LagMetrics) error {
+	if store == nil || broker == nil || log == nil || len(targets) != 2 || len(metrics) > 1 {
 		return ErrBuildConfig
 	}
+
+	var lagMetrics *LagMetrics
+	if len(metrics) == 1 {
+		lagMetrics = metrics[0]
+	}
+	defer lagMetrics.Clear()
 
 	seen := make(map[string]bool, 2)
 	for _, target := range targets {
@@ -103,11 +109,13 @@ func RunObservations(ctx context.Context, store ObservationStore, broker LagRead
 		}
 
 		for _, target := range targets {
+			sampledAt := time.Now()
 			rows, err := broker.SampleLag(ctx, target.Group, target.Topic)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 
+			lagMetrics.Update(target, rows, err, sampledAt)
 			fields := []zap.Field{
 				zap.String("scope", "kafka"),
 				zap.String("topic", target.Topic),

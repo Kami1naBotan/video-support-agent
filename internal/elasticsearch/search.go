@@ -23,7 +23,7 @@ func (c *Client) SearchCandidatesAt(ctx context.Context, target string, query st
 	return c.searchCandidates(ctx, target, false, query, opts, at)
 }
 
-func (c *Client) searchCandidates(ctx context.Context, target string, resolveAlias bool, query string, opts retrieval.SearchOptions, at time.Time) ([]retrieval.Candidate, error) {
+func (c *Client) searchCandidates(ctx context.Context, target string, resolveAlias bool, query string, opts retrieval.SearchOptions, at time.Time) (result []retrieval.Candidate, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -50,6 +50,11 @@ func (c *Client) searchCandidates(ctx context.Context, target string, resolveAli
 	}
 
 	path := "/" + url.PathEscape(target) + "/_search?allow_partial_search_results=false"
+
+	ctx, finish := c.queryObserver.Start(ctx)
+	defer func() {
+		finish(resultErr)
+	}()
 
 	status, data, err := c.request(ctx, http.MethodPost, path, "application/json", body)
 	if err != nil {

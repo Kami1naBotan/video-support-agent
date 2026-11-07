@@ -16,27 +16,108 @@ import (
 	"gorm.io/gorm"
 )
 
-func New(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder) *gin.Engine {
+func New(
+	cfg config.Config,
+	db *gorm.DB,
+	tokens *auth.TokenManager,
+	contexts service.MessageContextStore,
+	limiter middleware.UserLimiter,
+	authLimiter middleware.AuthIPLimiter,
+	appLogger *zap.Logger,
+	chat service.ChatResponder,
+) *gin.Engine {
 	return NewWithRetriever(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, nil)
 }
 
-func NewWithRetriever(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever) *gin.Engine {
+func NewWithRetriever(
+	cfg config.Config,
+	db *gorm.DB,
+	tokens *auth.TokenManager,
+	contexts service.MessageContextStore,
+	limiter middleware.UserLimiter,
+	authLimiter middleware.AuthIPLimiter,
+	appLogger *zap.Logger,
+	chat service.ChatResponder,
+	retriever retrieval.Retriever,
+) *gin.Engine {
 	return NewWithRetrievers(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, nil)
 }
 
-func NewWithRetrievers(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever) *gin.Engine {
-	return newRouter(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, vectorRetriever, nil)
+func NewWithRetrievers(
+	cfg config.Config,
+	db *gorm.DB,
+	tokens *auth.TokenManager,
+	contexts service.MessageContextStore,
+	limiter middleware.UserLimiter,
+	authLimiter middleware.AuthIPLimiter,
+	appLogger *zap.Logger,
+	chat service.ChatResponder,
+	retriever retrieval.Retriever,
+	vectorRetriever retrieval.HydratedRetriever,
+) *gin.Engine {
+	return newRouter(
+		cfg,
+		db,
+		tokens,
+		contexts,
+		limiter,
+		authLimiter,
+		appLogger,
+		chat,
+		retriever,
+		vectorRetriever,
+		nil,
+	)
 }
 
-func NewWithMessageHandler(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever, messageHandler *handler.MessageHandler) *gin.Engine {
+func NewWithMessageHandler(
+	cfg config.Config,
+	db *gorm.DB,
+	tokens *auth.TokenManager,
+	contexts service.MessageContextStore,
+	limiter middleware.UserLimiter,
+	authLimiter middleware.AuthIPLimiter,
+	appLogger *zap.Logger,
+	chat service.ChatResponder,
+	retriever retrieval.Retriever,
+	vectorRetriever retrieval.HydratedRetriever,
+	messageHandler *handler.MessageHandler,
+	entryMiddleware ...gin.HandlerFunc,
+) *gin.Engine {
 	if messageHandler == nil {
 		panic("message handler is required")
 	}
 
-	return newRouter(cfg, db, tokens, contexts, limiter, authLimiter, appLogger, chat, retriever, vectorRetriever, messageHandler)
+	return newRouter(
+		cfg,
+		db,
+		tokens,
+		contexts,
+		limiter,
+		authLimiter,
+		appLogger,
+		chat,
+		retriever,
+		vectorRetriever,
+		messageHandler,
+		entryMiddleware...,
+	)
 }
 
-func newRouter(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contexts service.MessageContextStore, limiter middleware.UserLimiter, authLimiter middleware.AuthIPLimiter, appLogger *zap.Logger, chat service.ChatResponder, retriever retrieval.Retriever, vectorRetriever retrieval.HydratedRetriever, messageHandler *handler.MessageHandler) *gin.Engine {
+func newRouter(
+	cfg config.Config,
+	db *gorm.DB,
+	tokens *auth.TokenManager,
+	contexts service.MessageContextStore,
+	limiter middleware.UserLimiter,
+	authLimiter middleware.AuthIPLimiter,
+	appLogger *zap.Logger,
+	chat service.ChatResponder,
+	retriever retrieval.Retriever,
+	vectorRetriever retrieval.HydratedRetriever,
+	messageHandler *handler.MessageHandler,
+	entryMiddleware ...gin.HandlerFunc,
+) *gin.Engine {
 	r := gin.New()
 
 	trustedProxies, err := config.ValidateTrustedProxies(cfg.TrustedProxies)
@@ -45,6 +126,13 @@ func newRouter(cfg config.Config, db *gorm.DB, tokens *auth.TokenManager, contex
 	}
 	if err := r.SetTrustedProxies(trustedProxies); err != nil {
 		panic("invalid trusted proxy configuration")
+	}
+
+	for _, handler := range entryMiddleware {
+		if handler == nil {
+			panic("entry middleware is required")
+		}
+		r.Use(handler)
 	}
 
 	r.Use(middleware.SafeAccessLog(appLogger), middleware.SafeRecovery(appLogger), middleware.RequestTrace())

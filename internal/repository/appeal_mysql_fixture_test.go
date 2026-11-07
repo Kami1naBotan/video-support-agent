@@ -1,4 +1,4 @@
-//go:build day11mysql
+//go:build mysql
 
 package repository
 
@@ -24,30 +24,30 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-var day11SQLAt = time.Date(2026, 11, 3, 4, 0, 0, 123000000, time.UTC)
+var SQLAt = time.Date(2026, 11, 3, 4, 0, 0, 123000000, time.UTC)
 
-type day11SQLFixture struct {
+type SQLFixture struct {
 	db                              *gorm.DB
 	cfg                             *driver.Config
 	user, other                     model.User
 	conversation, otherConversation model.Conversation
 }
 
-func day11SQLMust(t *testing.T, err error) {
+func SQLMust(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
-func day11SQLContext(t *testing.T) context.Context {
+func SQLContext(t *testing.T) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	return ctx
 }
 
-func day11SQLKey() string {
+func SQLKey() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic(err)
@@ -58,37 +58,37 @@ func day11SQLKey() string {
 		b[:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
-func day11SQLOpen(t *testing.T, cfg *driver.Config) *gorm.DB {
+func SQLOpen(t *testing.T, cfg *driver.Config) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(gormmysql.Open(cfg.FormatDSN()), &gorm.Config{
 		Logger:               logger.Default.LogMode(logger.Silent),
 		DisableAutomaticPing: true,
 	})
-	day11SQLMust(t, err)
+	SQLMust(t, err)
 	pool, err := db.DB()
-	day11SQLMust(t, err)
+	SQLMust(t, err)
 	pool.SetMaxOpenConns(8)
 	pool.SetMaxIdleConns(4)
-	t.Cleanup(func() { day11SQLMust(t, pool.Close()) })
-	day11SQLMust(t, pool.PingContext(day11SQLContext(t)))
+	t.Cleanup(func() { SQLMust(t, pool.Close()) })
+	SQLMust(t, pool.PingContext(SQLContext(t)))
 	return db
 }
 
-func day11SQLDatabase(t *testing.T) (*gorm.DB, *driver.Config) {
+func SQLDatabase(t *testing.T) (*gorm.DB, *driver.Config) {
 	t.Helper()
-	if os.Getenv("DAY11_MYSQL_ACCEPT") != "1" {
+	if os.Getenv("MYSQL_ACCEPT") != "1" {
 		t.Fatal("run the dedicated block3 script; database tests are not implicitly enabled")
 	}
-	host := os.Getenv("DAY11_MYSQL_HOST")
-	port := os.Getenv("DAY11_MYSQL_PORT")
-	user := os.Getenv("DAY11_MYSQL_USER")
+	host := os.Getenv("MYSQL_HOST")
+	port := os.Getenv("MYSQL_PORT")
+	user := os.Getenv("MYSQL_USER")
 	if host == "" || port == "" || user == "" {
-		t.Fatal("DAY11_MYSQL_HOST/PORT/USER required")
+		t.Fatal("MYSQL_HOST/PORT/USER required")
 	}
 
 	cfg := driver.NewConfig()
 	cfg.Net, cfg.Addr = "tcp", net.JoinHostPort(host, port)
-	cfg.User, cfg.Passwd = user, os.Getenv("DAY11_MYSQL_PASSWORD")
+	cfg.User, cfg.Passwd = user, os.Getenv("MYSQL_PASSWORD")
 	cfg.ParseTime, cfg.Loc = true, time.UTC
 	cfg.Timeout = 5 * time.Second
 	cfg.ReadTimeout = 5 * time.Second
@@ -101,13 +101,13 @@ func day11SQLDatabase(t *testing.T) (*gorm.DB, *driver.Config) {
 	}
 
 	admin, err := sql.Open("mysql", cfg.FormatDSN())
-	day11SQLMust(t, err)
+	SQLMust(t, err)
 	defer admin.Close()
 
-	ctx := day11SQLContext(t)
-	day11SQLMust(t, admin.PingContext(ctx))
+	ctx := SQLContext(t)
+	SQLMust(t, admin.PingContext(ctx))
 	var version string
-	day11SQLMust(t,
+	SQLMust(t,
 		admin.QueryRowContext(ctx, "SELECT VERSION()").Scan(&version),
 	)
 	if strings.Contains(strings.ToLower(version), "mariadb") ||
@@ -115,24 +115,24 @@ func day11SQLDatabase(t *testing.T) (*gorm.DB, *driver.Config) {
 		t.Fatalf("this suite targets MySQL 8/9; observed %s", version)
 	}
 
-	name := "day11_test_" + strings.ReplaceAll(day11SQLKey(), "-", "")
+	name := "_test_" + strings.ReplaceAll(SQLKey(), "-", "")
 	_, err = admin.ExecContext(ctx,
 		"CREATE DATABASE `"+name+"` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
 	)
 	// 不使用IF NOT EXISTS，不接受业务库名，不复用已有库。
-	day11SQLMust(t, err)
+	SQLMust(t, err)
 
 	cfg.DBName = name
-	db := day11SQLOpen(t, cfg)
+	db := SQLOpen(t, cfg)
 	t.Logf("MYSQL_DATABASE name=%s version=%s retained=true", name, version)
 	return db, cfg
 }
 
-func day11SQLSeed(
+func SQLSeed(
 	t *testing.T, db *gorm.DB, cfg *driver.Config,
-) *day11SQLFixture {
+) *SQLFixture {
 	t.Helper()
-	f := &day11SQLFixture{db: db, cfg: cfg}
+	f := &SQLFixture{db: db, cfg: cfg}
 	f.user = model.User{
 		Username:     "TEST_ONLY_owner",
 		PasswordHash: "NOT_A_LOGIN_HASH",
@@ -144,7 +144,7 @@ func day11SQLSeed(
 		Role:         model.RoleUser,
 	}
 	for _, value := range []any{&f.user, &f.other} {
-		day11SQLMust(t, db.Omit(clause.Associations).Create(value).Error)
+		SQLMust(t, db.Omit(clause.Associations).Create(value).Error)
 	}
 	f.conversation = model.Conversation{
 		UserID: f.user.ID, Title: "TEST_ONLY_owner",
@@ -153,21 +153,21 @@ func day11SQLSeed(
 		UserID: f.other.ID, Title: "TEST_ONLY_other",
 	}
 	for _, value := range []any{&f.conversation, &f.otherConversation} {
-		day11SQLMust(t, db.Omit(clause.Associations).Create(value).Error)
+		SQLMust(t, db.Omit(clause.Associations).Create(value).Error)
 	}
 	return f
 }
 
-func day11SQLRepo(t *testing.T, db *gorm.DB) *AppealTicketRepository {
+func SQLRepo(t *testing.T, db *gorm.DB) *AppealTicketRepository {
 	t.Helper()
 	r, err := NewAppealTicketRepositoryWithClock(
-		db, func() time.Time { return day11SQLAt },
+		db, func() time.Time { return SQLAt },
 	)
-	day11SQLMust(t, err)
+	SQLMust(t, err)
 	return r
 }
 
-func day11SQLSnapshot(at time.Time) model.AppealEligibilitySnapshot {
+func SQLSnapshot(at time.Time) model.AppealEligibilitySnapshot {
 	return model.AppealEligibilitySnapshot{
 		SchemaVersion: 1,
 		Decision:      model.AppealEligibilityManualReview,
@@ -181,13 +181,13 @@ func day11SQLSnapshot(at time.Time) model.AppealEligibilitySnapshot {
 	}
 }
 
-func day11SQLCheck(
+func SQLCheck(
 	_ context.Context, _ service.AppealEvidenceChecker, at time.Time,
 ) (model.AppealEligibilitySnapshot, error) {
-	return service.NormalizeAppealSnapshot(day11SQLSnapshot(at))
+	return service.NormalizeAppealSnapshot(SQLSnapshot(at))
 }
 
-func (f *day11SQLFixture) command(t *testing.T) service.AppealCreateCommand {
+func (f *SQLFixture) command(t *testing.T) service.AppealCreateCommand {
 	t.Helper()
 	input := service.CreateAppealInput{
 		SubjectType: model.AppealSubjectAccount,
@@ -196,29 +196,29 @@ func (f *day11SQLFixture) command(t *testing.T) service.AppealCreateCommand {
 		IntakeMode:  model.AppealIntakeManualReview,
 	}
 	hash, err := service.AppealRequestHash(f.conversation.ID, input)
-	day11SQLMust(t, err)
-	digest, err := service.AppealPolicyDigest(day11SQLSnapshot(day11SQLAt))
-	day11SQLMust(t, err)
+	SQLMust(t, err)
+	digest, err := service.AppealPolicyDigest(SQLSnapshot(SQLAt))
+	SQLMust(t, err)
 	return service.AppealCreateCommand{
 		UserID:               f.user.ID,
 		ConversationID:       f.conversation.ID,
-		IdempotencyKey:       day11SQLKey(),
+		IdempotencyKey:       SQLKey(),
 		RequestHash:          hash,
 		ExpectedPolicyDigest: digest,
 		Input:                input,
 	}
 }
 
-func day11SQLCounts(
+func SQLCounts(
 	t *testing.T, db *gorm.DB, c service.AppealCreateCommand,
 	wantTickets, wantRecords int64,
 ) {
 	t.Helper()
 	var tickets, records int64
-	day11SQLMust(t, db.Model(&model.AppealTicket{}).
+	SQLMust(t, db.Model(&model.AppealTicket{}).
 		Where("user_id = ? AND idempotency_key = ?", c.UserID, c.IdempotencyKey).
 		Count(&tickets).Error)
-	day11SQLMust(t, db.Table("ticket_records AS r").
+	SQLMust(t, db.Table("ticket_records AS r").
 		Joins("JOIN appeal_tickets AS a ON a.id = r.ticket_id").
 		Where("a.user_id = ? AND a.idempotency_key = ?", c.UserID, c.IdempotencyKey).
 		Count(&records).Error)
@@ -230,7 +230,7 @@ func day11SQLCounts(
 		c.IdempotencyKey, tickets, records)
 }
 
-func day11SQLLegacyModels() []any {
+func SQLLegacyModels() []any {
 	return []any{
 		&model.User{}, &model.Conversation{}, &model.Message{},
 		&model.KnowledgeDocument{}, &model.RuleCategory{}, &model.RuleVersion{},
@@ -239,20 +239,20 @@ func day11SQLLegacyModels() []any {
 	}
 }
 
-func day11SQLMigrate(t *testing.T, db *gorm.DB) {
+func SQLMigrate(t *testing.T, db *gorm.DB) {
 	t.Helper()
-	day11SQLMust(t, database.Migrate(db))
+	SQLMust(t, database.Migrate(db))
 }
 
-func (f *day11SQLFixture) rule(t *testing.T) model.AppealRuleEvidence {
+func (f *SQLFixture) rule(t *testing.T) model.AppealRuleEvidence {
 	t.Helper()
-	category := model.RuleCategory{Code: day11SQLKey(), Name: "TEST_ONLY"}
-	doc := model.KnowledgeDocument{DocumentKey: day11SQLKey()}
+	category := model.RuleCategory{Code: SQLKey(), Name: "TEST_ONLY"}
+	doc := model.KnowledgeDocument{DocumentKey: SQLKey()}
 	for _, value := range []any{&category, &doc} {
-		day11SQLMust(t, f.db.Omit(clause.Associations).Create(value).Error)
+		SQLMust(t, f.db.Omit(clause.Associations).Create(value).Error)
 	}
 
-	at := day11SQLAt
+	at := SQLAt
 	version := model.RuleVersion{
 		DocumentID: doc.ID, CategoryID: category.ID,
 		Version: "TEST_ONLY_v1", ContentRevision: 1,
@@ -261,7 +261,7 @@ func (f *day11SQLFixture) rule(t *testing.T) model.AppealRuleEvidence {
 		SourceURL:   "https://example.invalid/test",
 		EffectiveAt: &at, PublishedAt: &at,
 	}
-	day11SQLMust(t, f.db.Omit(clause.Associations).Create(&version).Error)
+	SQLMust(t, f.db.Omit(clause.Associations).Create(&version).Error)
 
 	article := model.RuleArticle{
 		VersionID: version.ID, ArticleOrder: 1, Content: "TEST_ONLY",
@@ -272,9 +272,9 @@ func (f *day11SQLFixture) rule(t *testing.T) model.AppealRuleEvidence {
 		VerificationNote: "TEST_ONLY", ContentSnapshot: "{}",
 	}
 	for _, value := range []any{&article, &verification} {
-		day11SQLMust(t, f.db.Omit(clause.Associations).Create(value).Error)
+		SQLMust(t, f.db.Omit(clause.Associations).Create(value).Error)
 	}
-	day11SQLMust(t, f.db.Model(&doc).Updates(map[string]any{
+	SQLMust(t, f.db.Model(&doc).Updates(map[string]any{
 		"current_version_id":   version.ID,
 		"publication_revision": 1,
 	}).Error)

@@ -33,6 +33,7 @@ type KnowledgeEventInbox struct {
 	VersionID           uint64 `gorm:"not null;->;<-:create"`
 	PublicationRevision uint64 `gorm:"not null;->;<-:create"`
 	TraceID             string `gorm:"type:char(32);not null;->;<-:create"`
+	TraceParent         string `gorm:"size:55;not null;default:'';->;<-:create"`
 	Payload             []byte `gorm:"type:mediumblob;not null;->;<-:create"`
 	PayloadSHA256       string `gorm:"type:char(64);not null;->;<-:create"`
 
@@ -54,6 +55,7 @@ type KnowledgeIndexAttempt struct {
 	Attempt uint32 `gorm:"primaryKey;autoIncrement:false;->;<-:create"`
 
 	SourceSHA256 string `gorm:"type:char(64);not null;->;<-:create"`
+	TraceParent  string `gorm:"size:55;not null;default:'';->;<-:create"`
 	Topic        string `gorm:"size:128;not null;->;<-:create"`
 	Partition    int32  `gorm:"not null;->;<-:create"`
 	Offset       int64  `gorm:"not null;->;<-:create"`

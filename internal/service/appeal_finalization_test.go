@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestDay11Budget(t *testing.T) {
+func TestBudget(t *testing.T) {
 	t.Run("requires_installation", func(t *testing.T) {
 		if _, err := AppealFinalizationContext(
 			context.Background(),

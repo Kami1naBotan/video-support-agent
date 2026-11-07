@@ -17,7 +17,17 @@ import (
 	"go.uber.org/zap"
 )
 
-func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger) (runErr error) {
+func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger, observers ...workerObservation) (runErr error) {
+	if len(observers) > 1 {
+		return errors.New("worker_observer_config_invalid")
+	}
+
+	var observation workerObservation
+	if len(observers) == 1 {
+		observation = observers[0]
+	}
+	observer := observation.Async
+
 	settings, err := config.LoadKnowledgeWorkerSettings()
 	if err != nil {
 		return err
@@ -101,7 +111,8 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 		return errors.New("outbox_repository_create_failed")
 	}
 
-	relay, err := outboxrelay.New(outboxStore, producer, log)
+	publisher := eventbus.ObservePublisher(producer, observer)
+	relay, err := outboxrelay.New(outboxStore, publisher, log)
 	if err != nil {
 		return errors.New("outbox_relay_create_failed")
 	}
@@ -124,7 +135,7 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 		return errors.New("dual_builder_create_failed")
 	}
 
-	runtime, err := knowledgeworker.NewRuntime(buildStore, builder, log)
+	runtime, err := knowledgeworker.NewRuntime(buildStore, builder, log, observer)
 	if err != nil {
 		return errors.New("worker_runtime_create_failed")
 	}
@@ -149,6 +160,8 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 		return errors.New("source_isolator_create_failed")
 	}
 
+	sourceHandler = eventbus.ObserveHandler(sourceHandler, observer)
+
 	sourceConsumer, err := eventbus.NewConsumer(cfg.Kafka, settings.SourceGroup, eventbus.TopicDocumentEvents)
 	if err != nil {
 		return errors.New("source_consumer_create_failed")
@@ -168,6 +181,8 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 	if err != nil {
 		return errors.New("retry_isolator_create_failed")
 	}
+
+	retryHandler = eventbus.ObserveHandler(retryHandler, observer)
 
 	retryConsumer, err := eventbus.NewConsumer(cfg.Kafka, settings.RetryGroup, eventbus.TopicIndexRetry)
 	if err != nil {
@@ -198,6 +213,14 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 			Group: settings.RetryGroup,
 			Topic: eventbus.TopicIndexRetry,
 		},
+	}
+
+	var lagMetrics *knowledgeworker.LagMetrics
+	if observation.Runtime != nil {
+		lagMetrics, err = knowledgeworker.NewLagMetrics(observation.Runtime, lagTargets)
+		if err != nil {
+			return errors.New("worker_lag_metrics_create_failed")
+		}
 	}
 
 	log.Info("worker started",
@@ -238,7 +261,7 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger)
 		{
 			name: "knowledge_observation",
 			run: func(ctx context.Context) error {
-				return knowledgeworker.RunObservations(ctx, buildStore, producer, log, lagTargets)
+				return knowledgeworker.RunObservations(ctx, buildStore, producer, log, lagTargets, lagMetrics)
 			},
 		},
 	})

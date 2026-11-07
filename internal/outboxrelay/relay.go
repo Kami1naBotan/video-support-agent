@@ -141,8 +141,12 @@ func (r *Relay) deliver(ctx context.Context, row *model.EventOutbox) error {
 
 func validate(row *model.EventOutbox) (eventbus.Record, string) {
 	record := eventbus.Record{
-		Topic: row.Topic, Key: row.MessageKey,
-		MessageID: row.MessageID, TraceID: row.TraceID, Value: row.Payload,
+		Topic:       row.Topic,
+		Key:         row.MessageKey,
+		MessageID:   row.MessageID,
+		TraceID:     row.TraceID,
+		TraceParent: row.TraceParent,
+		Value:       row.Payload,
 	}
 	if record.Validate() != nil {
 		return eventbus.Record{}, repository.OutboxInvalidRecord

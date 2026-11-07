@@ -10,6 +10,7 @@ import (
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
 	"video-support-agent/internal/knowledgefailure"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/knowledgeworker"
 	"video-support-agent/internal/model"
@@ -192,6 +193,7 @@ func writeRecoveryOutbox(tx *gorm.DB, event model.KnowledgeEventInbox, recovery 
 		Topic:         topic,
 		MessageKey:    message.DocumentID,
 		TraceID:       event.TraceID,
+		TraceParent:   observability.CaptureTraceParent(tx.Statement.Context, event.TraceParent),
 		Payload:       payload,
 		PayloadSHA256: hex.EncodeToString(digest[:]),
 		Status:        model.OutboxPending,

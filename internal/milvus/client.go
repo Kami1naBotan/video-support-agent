@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/config"
 )
@@ -42,15 +43,24 @@ func (e *APIError) Unwrap() error {
 }
 
 type Client struct {
-	baseURL   string
-	database  string
-	alias     string
-	timeout   time.Duration
-	http      *http.Client
-	transport *http.Transport
+	baseURL       string
+	database      string
+	alias         string
+	timeout       time.Duration
+	http          *http.Client
+	transport     *http.Transport
+	queryObserver *observability.QueryObserver
 }
 
-func NewClient(cfg config.MilvusConfig) (*Client, error) {
+func NewClient(cfg config.MilvusConfig, observers ...*observability.QueryObserver) (*Client, error) {
+	if len(observers) > 1 {
+		return nil, errors.New("at most one query observer is allowed")
+	}
+
+	var observer *observability.QueryObserver
+	if len(observers) == 1 {
+		observer = observers[0]
+	}
 	if err := config.ValidateMilvusConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -88,7 +98,8 @@ func NewClient(cfg config.MilvusConfig) (*Client, error) {
 				return http.ErrUseLastResponse
 			},
 		},
-		transport: transport,
+		transport:     transport,
+		queryObserver: observer,
 	}, nil
 }
 

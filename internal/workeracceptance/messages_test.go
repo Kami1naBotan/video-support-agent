@@ -16,6 +16,7 @@ import (
 	"video-support-agent/internal/knowledgefailure"
 	"video-support-agent/internal/knowledgeworker"
 	"video-support-agent/internal/model"
+	"video-support-agent/internal/observability"
 	"video-support-agent/internal/outboxrelay"
 	"video-support-agent/internal/repository"
 )
@@ -75,6 +76,9 @@ func wireRows(t *testing.T, address string, rows []model.EventOutbox) {
 			}
 			if r.Topic != row.Topic || string(r.Key) != row.MessageKey || headers["trace_id"] != row.TraceID || !bytes.Equal(r.Value, row.Payload) {
 				t.Fatal("outbox/wire mismatch")
+			}
+			if headers["traceparent"] != observability.NormalizeTraceParent(row.TraceParent) {
+				t.Fatal("persisted/wire trace parent mismatch")
 			}
 			t.Logf("wire topic=%s partition=%d offset=%d message=%s", r.Topic, r.Partition, r.Offset, row.MessageID)
 			delete(want, row.MessageID)

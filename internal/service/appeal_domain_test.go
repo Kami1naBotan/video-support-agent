@@ -11,19 +11,19 @@ import (
 	"video-support-agent/internal/model"
 )
 
-var day11DomainAt = time.Date(2026, 11, 3, 8, 0, 0, 123000000, time.UTC)
+var DomainAt = time.Date(2026, 11, 3, 8, 0, 0, 123000000, time.UTC)
 
-func day11DomainInput() CreateAppealInput {
+func DomainInput() CreateAppealInput {
 	return CreateAppealInput{
 		SubjectType: model.AppealSubjectAccount, SubjectRef: "user-42",
 		Reason: "Please review.\nLine 2", IntakeMode: model.AppealIntakeManualReview,
 	}
 }
 
-func day11DomainSnapshot() model.AppealEligibilitySnapshot {
+func DomainSnapshot() model.AppealEligibilitySnapshot {
 	return model.AppealEligibilitySnapshot{
 		SchemaVersion: 1, Decision: model.AppealEligibilityEligible,
-		ReasonCode: "test_only_eligible", CheckedAt: day11DomainAt,
+		ReasonCode: "test_only_eligible", CheckedAt: DomainAt,
 		PolicyCode: "TEST_ONLY", PolicyRevision: "v1",
 		EvidenceRefs: []model.AppealRuleEvidence{
 			{DocumentID: 2, VersionID: 20, ArticleID: 200, PublicationRevision: 1},
@@ -37,13 +37,13 @@ func day11DomainSnapshot() model.AppealEligibilitySnapshot {
 	}
 }
 
-func TestDay11DomainInput(t *testing.T) {
+func TestDomainInput(t *testing.T) {
 	t.Run("normalization", func(t *testing.T) {
-		raw := day11DomainInput()
+		raw := DomainInput()
 		raw.SubjectRef = " \tuser-42\u3000"
 		raw.Reason = "\r\nPlease review.\r\nLine 2 \t"
 		got, err := NormalizeCreateAppealInput(raw)
-		if err != nil || got != day11DomainInput() {
+		if err != nil || got != DomainInput() {
 			t.Fatalf("normalized=%+v err=%v", got, err)
 		}
 		again, err := NormalizeCreateAppealInput(got)
@@ -77,7 +77,7 @@ func TestDay11DomainInput(t *testing.T) {
 		{"raw_reason_limit", func(v *CreateAppealInput) { v.Reason = strings.Repeat(" ", 16385) }, ErrInvalidArgument},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := day11DomainInput()
+			v := DomainInput()
 			tc.edit(&v)
 			_, err := NormalizeCreateAppealInput(v)
 			if !errors.Is(err, tc.want) {
@@ -99,7 +99,7 @@ func TestDay11DomainInput(t *testing.T) {
 		model.AppealSubjectOther,
 	} {
 		t.Run(string(subject), func(t *testing.T) {
-			v := day11DomainInput()
+			v := DomainInput()
 			v.SubjectType = subject
 			if _, err := NormalizeCreateAppealInput(v); err != nil {
 				t.Fatal(err)
@@ -108,10 +108,10 @@ func TestDay11DomainInput(t *testing.T) {
 	}
 }
 
-func TestDay11DomainHash(t *testing.T) {
+func TestDomainHash(t *testing.T) {
 	const golden = "372d95aef4629aeefa284fca7d94354f2d477d23b7b618147aaa9dc2f0c4663b"
 	// 独立固定JSON字节的SHA256金样本；不调用生产编码器生成期望值。
-	base := day11DomainInput()
+	base := DomainInput()
 	got, err := AppealRequestHash(7, base)
 	if err != nil || got != golden {
 		t.Fatalf("hash=%s err=%v", got, err)
@@ -147,7 +147,7 @@ func TestDay11DomainHash(t *testing.T) {
 	}
 }
 
-func TestDay11DomainKey(t *testing.T) {
+func TestDomainKey(t *testing.T) {
 	const key = "12345678-1234-4234-8234-123456789abc"
 	for _, tc := range []struct {
 		name, value string
@@ -182,17 +182,17 @@ func TestDay11DomainKey(t *testing.T) {
 	}
 }
 
-func TestDay11DomainSnapshot(t *testing.T) {
+func TestDomainSnapshot(t *testing.T) {
 	t.Run("copy_sort_time", func(t *testing.T) {
-		raw := day11DomainSnapshot()
-		raw.CheckedAt = day11DomainAt.
+		raw := DomainSnapshot()
+		raw.CheckedAt = DomainAt.
 			In(time.FixedZone("test", 8*3600)).
 			Add(999 * time.Microsecond)
 		got, err := NormalizeAppealSnapshot(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !got.CheckedAt.Equal(day11DomainAt) ||
+		if !got.CheckedAt.Equal(DomainAt) ||
 			got.CheckedAt.Location() != time.UTC ||
 			got.EvidenceRefs[0].DocumentID != 1 ||
 			got.FactSources[0].Field != "reason" ||
@@ -213,7 +213,7 @@ func TestDay11DomainSnapshot(t *testing.T) {
 			SchemaVersion: 1,
 			Decision:      model.AppealEligibilityNeedsMoreInfo,
 			ReasonCode:    "missing_fields",
-			CheckedAt:     day11DomainAt,
+			CheckedAt:     DomainAt,
 			MissingFields: []string{"subject_ref", "reason"},
 			FactSources: []model.AppealFactProvenance{
 				{Field: "subject_type", Source: model.AppealFactUserReported},
@@ -265,7 +265,7 @@ func TestDay11DomainSnapshot(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := day11DomainSnapshot()
+			s := DomainSnapshot()
 			tc.edit(&s)
 			if _, err := NormalizeAppealSnapshot(s); !errors.Is(err, ErrAppealInvalidSnapshot) {
 				t.Fatalf("error=%v", err)
@@ -274,14 +274,14 @@ func TestDay11DomainSnapshot(t *testing.T) {
 	}
 }
 
-func TestDay11DomainPolicyDigest(t *testing.T) {
-	base := day11DomainSnapshot()
+func TestDomainPolicyDigest(t *testing.T) {
+	base := DomainSnapshot()
 	want, err := AppealPolicyDigest(base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reordered := day11DomainSnapshot()
-	reordered.CheckedAt = day11DomainAt.Add(time.Hour)
+	reordered := DomainSnapshot()
+	reordered.CheckedAt = DomainAt.Add(time.Hour)
 	reordered.EvidenceRefs[0], reordered.EvidenceRefs[1] =
 		reordered.EvidenceRefs[1], reordered.EvidenceRefs[0]
 	reordered.FactSources[0], reordered.FactSources[2] =
@@ -317,7 +317,7 @@ func TestDay11DomainPolicyDigest(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := day11DomainSnapshot()
+			s := DomainSnapshot()
 			tc.edit(&s)
 			got, err := AppealPolicyDigest(s)
 			if err != nil || got == want {
@@ -327,49 +327,49 @@ func TestDay11DomainPolicyDigest(t *testing.T) {
 	}
 }
 
-type day11DomainProvider struct {
+type DomainProvider struct {
 	policy AppealPolicy
 	err    error
 }
 
-func (p day11DomainProvider) Resolve(
+func (p DomainProvider) Resolve(
 	context.Context, model.AppealSubjectType,
 ) (AppealPolicy, error) {
 	return p.policy, p.err
 }
 
-type day11DomainPolicy struct {
+type DomainPolicy struct {
 	def    AppealPolicyDefinition
 	result AppealPolicyEvaluation
 	err    error
 	calls  int
 }
 
-func (p *day11DomainPolicy) Definition() AppealPolicyDefinition {
+func (p *DomainPolicy) Definition() AppealPolicyDefinition {
 	return p.def
 }
 
-func (p *day11DomainPolicy) Evaluate(
+func (p *DomainPolicy) Evaluate(
 	context.Context, AppealFacts, time.Time,
 ) (AppealPolicyEvaluation, error) {
 	p.calls++
 	return p.result, p.err
 }
 
-type day11DomainEvidence struct {
+type DomainEvidence struct {
 	current bool
 	err     error
 	calls   int
 }
 
-func (e *day11DomainEvidence) CheckAppealEvidence(
+func (e *DomainEvidence) CheckAppealEvidence(
 	context.Context, []model.AppealRuleEvidence, time.Time,
 ) (bool, error) {
 	e.calls++
 	return e.current, e.err
 }
 
-func TestDay11DomainEligibility(t *testing.T) {
+func TestDomainEligibility(t *testing.T) {
 	dependencyErr := errors.New("test dependency unavailable")
 	for _, name := range []string{
 		"eligible", "ineligible", "manual", "missing", "no_policy", "scope",
@@ -378,11 +378,11 @@ func TestDay11DomainEligibility(t *testing.T) {
 		"canceled", "nil_evidence",
 	} {
 		t.Run(name, func(t *testing.T) {
-			policy := &day11DomainPolicy{
+			policy := &DomainPolicy{
 				def: AppealPolicyDefinition{
 					Code: "TEST_ONLY", Revision: "v1",
 					SubjectType:            model.AppealSubjectAccount,
-					EvidenceRefs:           day11DomainSnapshot().EvidenceRefs,
+					EvidenceRefs:           DomainSnapshot().EvidenceRefs,
 					RequiredVerifiedFields: []string{"subject_ref"},
 				},
 				result: AppealPolicyEvaluation{
@@ -391,10 +391,10 @@ func TestDay11DomainEligibility(t *testing.T) {
 					VerifiedFields: []string{"subject_ref"},
 				},
 			}
-			provider := day11DomainProvider{policy: policy}
-			evidence := &day11DomainEvidence{current: true}
+			provider := DomainProvider{policy: policy}
+			evidence := &DomainEvidence{current: true}
 			var checker AppealEvidenceChecker = evidence
-			facts := appealFactsFromInput(day11DomainInput())
+			facts := appealFactsFromInput(DomainInput())
 			ctx := context.Background()
 			want, reason := model.AppealEligibilityEligible, "test_only_eligible"
 			var wantErr error
@@ -470,7 +470,7 @@ func TestDay11DomainEligibility(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := svc.Evaluate(ctx, facts, day11DomainAt, checker)
+			got, err := svc.Evaluate(ctx, facts, DomainAt, checker)
 			if !errors.Is(err, wantErr) {
 				t.Fatalf("error=%v want=%v", err, wantErr)
 			}
@@ -485,7 +485,7 @@ func TestDay11DomainEligibility(t *testing.T) {
 				return
 			}
 			if got.Decision != want || got.ReasonCode != reason ||
-				!got.CheckedAt.Equal(day11DomainAt) {
+				!got.CheckedAt.Equal(DomainAt) {
 				t.Fatalf("decision=%+v want=%s/%s", got, want, reason)
 			}
 			if _, err := NormalizeAppealSnapshot(got); err != nil {
@@ -518,8 +518,8 @@ func TestDay11DomainEligibility(t *testing.T) {
 		}
 		got, err := svc.Evaluate(
 			context.Background(),
-			appealFactsFromInput(day11DomainInput()),
-			day11DomainAt,
+			appealFactsFromInput(DomainInput()),
+			DomainAt,
 			nil,
 		)
 		if err != nil || got.Decision != model.AppealEligibilityManualReview ||
@@ -532,7 +532,7 @@ func TestDay11DomainEligibility(t *testing.T) {
 	}
 }
 
-func TestDay11DomainIntake(t *testing.T) {
+func TestDomainIntake(t *testing.T) {
 	for _, decision := range []model.AppealEligibilityDecision{
 		model.AppealEligibilityEligible,
 		model.AppealEligibilityIneligible,
@@ -544,7 +544,7 @@ func TestDay11DomainIntake(t *testing.T) {
 			model.AppealIntakeManualReview,
 		} {
 			t.Run(string(decision)+"/"+string(mode), func(t *testing.T) {
-				s := day11DomainSnapshot()
+				s := DomainSnapshot()
 				s.Decision = decision
 				var wantStatus model.AppealTicketStatus
 				var wantErr error
@@ -576,7 +576,7 @@ func TestDay11DomainIntake(t *testing.T) {
 			})
 		}
 	}
-	if _, err := AppealInitialStatus(day11DomainSnapshot(), "auto"); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := AppealInitialStatus(DomainSnapshot(), "auto"); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("invalid mode: %v", err)
 	}
 }

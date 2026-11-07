@@ -19,6 +19,7 @@ type Config struct {
 	Embedding          EmbeddingConfig
 	Milvus             MilvusConfig
 	Kafka              KafkaConfig
+	Observability      ObservabilityConfig
 	TrustedProxies     []string
 }
 
@@ -140,6 +141,7 @@ func Load() Config {
 			Timeout:         getEnv("MILVUS_TIMEOUT", "5s"),
 		},
 		Kafka:          LoadKafkaConfig(),
+		Observability:  LoadObservabilityConfig(),
 		TrustedProxies: splitTrustedProxies(os.Getenv("TRUSTED_PROXIES")),
 	}
 }

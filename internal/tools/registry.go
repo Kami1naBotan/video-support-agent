@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"sync"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/retrieval"
 	"video-support-agent/internal/service"
@@ -26,14 +27,16 @@ type RegistryDependencies struct {
 	Knowledge     RuleDetailReader
 	Appeals       AppealToolsService
 	WriteAudit    CreateWriteAudit
+	Observation   *observability.ExecutionObserver
 }
 
 type Registry struct {
-	mu      sync.Mutex
-	entries map[string]tool.InvokableTool
-	order   []string
-	rules   *RuleSession
-	create  *CreateAppealTicketTool
+	mu          sync.Mutex
+	entries     map[string]tool.InvokableTool
+	order       []string
+	rules       *RuleSession
+	create      *CreateAppealTicketTool
+	observation *observability.ExecutionObserver
 }
 
 func NewRegistry(caller Caller, deps RegistryDependencies, confirmed *ConfirmedAppeal) (*Registry, error) {
@@ -95,8 +98,9 @@ func NewRegistry(caller Caller, deps RegistryDependencies, confirmed *ConfirmedA
 			CreateAppealTicketName,
 			QueryTicketStatusName,
 		},
-		rules:  session,
-		create: create,
+		rules:       session,
+		create:      create,
+		observation: deps.Observation,
 	}, nil
 }
 
@@ -158,7 +162,7 @@ func (r *Registry) InvokeConfirmed(ctx context.Context) (string, error) {
 	return r.invoke(ctx, CreateAppealTicketName, raw)
 }
 
-func (r *Registry) invoke(ctx context.Context, name, raw string) (string, error) {
+func (r *Registry) invoke(ctx context.Context, name, raw string) (result string, returnErr error) {
 	if !r.mu.TryLock() {
 		return "", fail(service.ErrInvalidArgument)
 	}
@@ -168,7 +172,42 @@ func (r *Registry) invoke(ctx context.Context, name, raw string) (string, error)
 	if !exists {
 		return "", fail(service.ErrInvalidArgument)
 	}
-	return entry.InvokableRun(ctx, raw)
+
+	phase := "chat"
+	if r.create.confirmed != nil {
+		phase = "confirm"
+	}
+
+	recordEvaluationInvocation(ctx, name, raw)
+
+	ctx, finish := r.observation.Start(ctx, name, phase)
+	returned := false
+	defer func() {
+		observed := observedToolResult(returnErr)
+
+		if !returned {
+			observed.Outcome = "failed"
+			observed.Reason = "panic"
+		} else if name == CreateAppealTicketName &&
+			phase == "chat" && returnErr == nil {
+			observed.Outcome = "rejected"
+			observed.Reason = "confirmation_required"
+		}
+
+		if name == CreateAppealTicketName {
+			_, observed.BusinessEffect = r.BusinessResult()
+			if returned && observed.BusinessEffect == "unknown" {
+				observed.Outcome = "unknown"
+				observed.Reason = "outcome_unknown"
+			}
+		}
+
+		finish(observed)
+	}()
+
+	result, returnErr = entry.InvokableRun(ctx, raw)
+	returned = true
+	return
 }
 
 func (r *Registry) RuleEvidence(handle string) (retrieval.HybridResult, error) {

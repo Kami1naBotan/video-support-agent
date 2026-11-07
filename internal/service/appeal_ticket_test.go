@@ -12,7 +12,7 @@ import (
 )
 
 // 仅测试用：严格比对已签发绑定和时间，不提供密码学证明。
-type day11Confirm struct {
+type Confirm struct {
 	binding             AppealConfirmationBinding
 	start, end, now     time.Time
 	issued, verified    int
@@ -20,7 +20,7 @@ type day11Confirm struct {
 	token               string
 }
 
-func (c *day11Confirm) Issue(
+func (c *Confirm) Issue(
 	_ context.Context,
 	b AppealConfirmationBinding,
 	start, end time.Time,
@@ -30,7 +30,7 @@ func (c *day11Confirm) Issue(
 	return c.token, c.issueErr
 }
 
-func (c *day11Confirm) Verify(
+func (c *Confirm) Verify(
 	ctx context.Context, token string, b AppealConfirmationBinding,
 ) error {
 	c.verified++
@@ -47,7 +47,7 @@ func (c *day11Confirm) Verify(
 	return nil
 }
 
-type day11Store struct {
+type Store struct {
 	t                               *testing.T
 	saved                           *model.AppealTicket
 	readErr                         error
@@ -59,7 +59,7 @@ type day11Store struct {
 	output                          func(*AppealCreateResult) (*AppealCreateResult, error)
 }
 
-func (s *day11Store) CheckConversationOwnership(
+func (s *Store) CheckConversationOwnership(
 	_ context.Context, user, conversation uint64,
 ) error {
 	if (user == 1 && (conversation == 7 || conversation == 8)) ||
@@ -69,14 +69,14 @@ func (s *day11Store) CheckConversationOwnership(
 	return ErrConversationNotFound
 }
 
-func (s *day11Store) CheckAppealEvidence(
+func (s *Store) CheckAppealEvidence(
 	context.Context, []model.AppealRuleEvidence, time.Time,
 ) (bool, error) {
 	s.t.Fatal("transaction callback used outer store instead of transaction checker")
 	return false, ErrAppealStorage
 }
 
-func (s *day11Store) GetByOperation(
+func (s *Store) GetByOperation(
 	_ context.Context, user uint64, key string,
 ) (*model.AppealTicket, error) {
 	s.reads++
@@ -91,7 +91,7 @@ func (s *day11Store) GetByOperation(
 	return &copy, nil
 }
 
-func (s *day11Store) GetByID(
+func (s *Store) GetByID(
 	_ context.Context, user, id uint64,
 ) (*model.AppealTicket, error) {
 	s.queries++
@@ -105,7 +105,7 @@ func (s *day11Store) GetByID(
 	return &copy, nil
 }
 
-func (s *day11Store) CreateWithRecord(
+func (s *Store) CreateWithRecord(
 	ctx context.Context,
 	command AppealCreateCommand,
 	check AppealTransactionCheck,
@@ -154,15 +154,15 @@ func (s *day11Store) CreateWithRecord(
 	return result, nil
 }
 
-func day11ServiceFixture(t *testing.T) (
-	*AppealTicketService, *day11Store, *day11Confirm,
+func ServiceFixture(t *testing.T) (
+	*AppealTicketService, *Store, *Confirm,
 ) {
 	t.Helper()
-	store := &day11Store{
-		t: t, at: day11DomainAt.Add(time.Second),
+	store := &Store{
+		t: t, at: DomainAt.Add(time.Second),
 	}
-	confirm := &day11Confirm{
-		now: day11DomainAt, token: "TEST_ONLY_TOKEN",
+	confirm := &Confirm{
+		now: DomainAt, token: "TEST_ONLY_TOKEN",
 	}
 	eligibility, err := NewAppealEligibilityService(NoAppealPolicies{})
 	if err != nil {
@@ -170,7 +170,7 @@ func day11ServiceFixture(t *testing.T) (
 	}
 	svc, err := NewAppealTicketServiceWithClock(
 		store, eligibility, confirm,
-		func() time.Time { return day11DomainAt },
+		func() time.Time { return DomainAt },
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -178,16 +178,16 @@ func day11ServiceFixture(t *testing.T) (
 	return svc, store, confirm
 }
 
-func day11Prepare(t *testing.T, svc *AppealTicketService) *PreparedAppeal {
+func Prepare(t *testing.T, svc *AppealTicketService) *PreparedAppeal {
 	t.Helper()
-	p, err := svc.Prepare(context.Background(), 1, 7, day11DomainInput())
+	p, err := svc.Prepare(context.Background(), 1, 7, DomainInput())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
 
-func day11Confirmation(p *PreparedAppeal) AppealConfirmationInput {
+func Confirmation(p *PreparedAppeal) AppealConfirmationInput {
 	return AppealConfirmationInput{
 		IdempotencyKey: p.Binding.IdempotencyKey,
 		PolicyDigest:   p.Binding.PolicyDigest,
@@ -195,11 +195,11 @@ func day11Confirmation(p *PreparedAppeal) AppealConfirmationInput {
 	}
 }
 
-func TestDay11FlowPrepare(t *testing.T) {
+func TestFlowPrepare(t *testing.T) {
 	t.Run("binding_no_write", func(t *testing.T) {
-		svc, store, confirm := day11ServiceFixture(t)
-		p := day11Prepare(t, svc)
-		hash, err := AppealRequestHash(7, day11DomainInput())
+		svc, store, confirm := ServiceFixture(t)
+		p := Prepare(t, svc)
+		hash, err := AppealRequestHash(7, DomainInput())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,18 +212,18 @@ func TestDay11FlowPrepare(t *testing.T) {
 			confirm.binding != p.Binding ||
 			ValidateAppealOperationKey(p.Binding.IdempotencyKey) != nil ||
 			p.InitialStatus != model.AppealTicketPendingReview ||
-			p.Input != day11DomainInput() ||
-			!p.IssuedAt.Equal(day11DomainAt) ||
-			!p.ExpiresAt.Equal(day11DomainAt.Add(10*time.Minute)) ||
+			p.Input != DomainInput() ||
+			!p.IssuedAt.Equal(DomainAt) ||
+			!p.ExpiresAt.Equal(DomainAt.Add(10*time.Minute)) ||
 			store.creates != 0 || store.writes != 0 ||
 			confirm.issued != 1 || confirm.verified != 0 {
 			t.Fatalf("invalid proposal or side effect: %+v", p)
 		}
-		second := day11Prepare(t, svc)
+		second := Prepare(t, svc)
 		if second.Binding.IdempotencyKey == p.Binding.IdempotencyKey {
 			t.Fatal("operation key reused")
 		}
-		for _, value := range []any{p, day11Confirmation(p)} {
+		for _, value := range []any{p, Confirmation(p)} {
 			data, err := json.Marshal(value)
 			if err != nil || string(data) != "{}" {
 				t.Fatalf("private proposal leaked: %s %v", data, err)
@@ -236,8 +236,8 @@ func TestDay11FlowPrepare(t *testing.T) {
 		"token_whitespace", "wrong_mode", "missing_fields",
 	} {
 		t.Run(name, func(t *testing.T) {
-			svc, store, confirm := day11ServiceFixture(t)
-			input := day11DomainInput()
+			svc, store, confirm := ServiceFixture(t)
+			input := DomainInput()
 			want := ErrAppealConfiguration
 			switch name {
 			case "nil_confirmation":
@@ -264,7 +264,7 @@ func TestDay11FlowPrepare(t *testing.T) {
 	}
 }
 
-func TestDay11FlowCreate(t *testing.T) {
+func TestFlowCreate(t *testing.T) {
 	for _, name := range []string{
 		"success", "wrong_key", "changed_payload", "changed_mode",
 		"wrong_digest", "wrong_user", "wrong_conversation", "empty_token",
@@ -274,9 +274,9 @@ func TestDay11FlowCreate(t *testing.T) {
 		"unknown_storage", "canceled_before",
 	} {
 		t.Run(name, func(t *testing.T) {
-			svc, store, confirm := day11ServiceFixture(t)
-			p := day11Prepare(t, svc)
-			input, confirmation := p.Input, day11Confirmation(p)
+			svc, store, confirm := ServiceFixture(t)
+			p := Prepare(t, svc)
+			input, confirmation := p.Input, Confirmation(p)
 			user, conversation := uint64(1), uint64(7)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -320,11 +320,11 @@ func TestDay11FlowCreate(t *testing.T) {
 				store.before = func() { confirm.now = confirm.end }
 				want, wantCreates = ErrAppealConfirmationRequired, 1
 			case "policy_changed", "transaction_checker":
-				policy := &day11DomainPolicy{
+				policy := &DomainPolicy{
 					def: AppealPolicyDefinition{
 						Code: "TEST_ONLY", Revision: "v1",
 						SubjectType:  model.AppealSubjectAccount,
-						EvidenceRefs: day11DomainSnapshot().EvidenceRefs,
+						EvidenceRefs: DomainSnapshot().EvidenceRefs,
 					},
 					result: AppealPolicyEvaluation{
 						Decision:   model.AppealEligibilityEligible,
@@ -332,16 +332,16 @@ func TestDay11FlowCreate(t *testing.T) {
 					},
 				}
 				svc.eligibility, _ = NewAppealEligibilityService(
-					day11DomainProvider{policy: policy},
+					DomainProvider{policy: policy},
 				)
-				store.checker = &day11DomainEvidence{current: true}
+				store.checker = &DomainEvidence{current: true}
 				if name == "policy_changed" {
 					want, wantCreates = ErrAppealPreconditionChanged, 1
 				} else {
 					input.IntakeMode = model.AppealIntakeStandard
 					snapshot, err := svc.eligibility.Evaluate(
 						ctx, appealFactsFromInput(input),
-						day11DomainAt, store.checker,
+						DomainAt, store.checker,
 					)
 					if err != nil {
 						t.Fatal(err)
@@ -406,7 +406,7 @@ func TestDay11FlowCreate(t *testing.T) {
 			}
 			if name == "transaction_checker" {
 				if result.InitialStatus != model.AppealTicketSubmitted ||
-					store.checker.(*day11DomainEvidence).calls != 2 {
+					store.checker.(*DomainEvidence).calls != 2 {
 					t.Fatal("transaction checker/status mismatch")
 				}
 			}
@@ -414,16 +414,16 @@ func TestDay11FlowCreate(t *testing.T) {
 	}
 }
 
-func TestDay11FlowReplayRecovery(t *testing.T) {
+func TestFlowReplayRecovery(t *testing.T) {
 	for _, name := range []string{
 		"expired_replay", "nil_replay", "conflict", "recover_found",
 		"recover_absent", "recover_error", "recover_conflict", "corrupt_saved",
 	} {
 		t.Run(name, func(t *testing.T) {
-			svc, store, confirm := day11ServiceFixture(t)
-			p := day11Prepare(t, svc)
+			svc, store, confirm := ServiceFixture(t)
+			p := Prepare(t, svc)
 			first, err := svc.Create(
-				context.Background(), 1, 7, p.Input, day11Confirmation(p),
+				context.Background(), 1, 7, p.Input, Confirmation(p),
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -463,7 +463,7 @@ func TestDay11FlowReplayRecovery(t *testing.T) {
 				)
 			} else {
 				result, err = svc.Create(
-					context.Background(), 1, 7, input, day11Confirmation(p),
+					context.Background(), 1, 7, input, Confirmation(p),
 				)
 			}
 			if !errors.Is(err, want) ||
@@ -482,16 +482,16 @@ func TestDay11FlowReplayRecovery(t *testing.T) {
 	}
 }
 
-func TestDay11FlowAccess(t *testing.T) {
+func TestFlowAccess(t *testing.T) {
 	for _, name := range []string{
 		"unauthenticated", "foreign_conversation", "query_own",
 		"query_other", "query_absent", "query_invalid_id", "query_error",
 	} {
 		t.Run(name, func(t *testing.T) {
-			svc, store, _ := day11ServiceFixture(t)
-			p := day11Prepare(t, svc)
+			svc, store, _ := ServiceFixture(t)
+			p := Prepare(t, svc)
 			if _, err := svc.Create(
-				context.Background(), 1, 7, p.Input, day11Confirmation(p),
+				context.Background(), 1, 7, p.Input, Confirmation(p),
 			); err != nil {
 				t.Fatal(err)
 			}
@@ -510,7 +510,7 @@ func TestDay11FlowAccess(t *testing.T) {
 				)
 				_, c := svc.Create(
 					context.Background(), user, conversation,
-					p.Input, day11Confirmation(p),
+					p.Input, Confirmation(p),
 				)
 				_, d := svc.Recover(
 					context.Background(), user, conversation,
@@ -570,8 +570,8 @@ func TestDay11FlowAccess(t *testing.T) {
 	}
 }
 
-func TestDay11FlowConfiguration(t *testing.T) {
-	svc, store, _ := day11ServiceFixture(t)
+func TestFlowConfiguration(t *testing.T) {
+	svc, store, _ := ServiceFixture(t)
 	for _, tc := range []struct {
 		name        string
 		store       AppealTicketStore
@@ -595,7 +595,7 @@ func TestDay11FlowConfiguration(t *testing.T) {
 		svc.confirmations = nil
 		result, err := svc.CheckEligibility(
 			context.Background(), 1, 7,
-			appealFactsFromInput(day11DomainInput()),
+			appealFactsFromInput(DomainInput()),
 		)
 		if err != nil || result.Decision != model.AppealEligibilityManualReview {
 			t.Fatalf("result=%+v err=%v", result, err)

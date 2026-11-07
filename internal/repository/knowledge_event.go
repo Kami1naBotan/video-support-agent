@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
@@ -73,6 +74,7 @@ func (r *KnowledgeRepository) appendSourceEvent(tx *gorm.DB, eventType string, d
 		Topic:         eventbus.TopicDocumentEvents,
 		MessageKey:    source.DocumentID,
 		TraceID:       trace,
+		TraceParent:   observability.CaptureTraceParent(tx.Statement.Context),
 		Payload:       payload,
 		PayloadSHA256: hex.EncodeToString(digest[:]),
 		Status:        model.OutboxPending,

@@ -17,6 +17,7 @@ type EventOutbox struct {
 	Topic         string `gorm:"size:128;not null;index:idx_outbox_document,priority:1;->;<-:create"`
 	MessageKey    string `gorm:"size:80;not null;index:idx_outbox_document,priority:2;->;<-:create"`
 	TraceID       string `gorm:"type:char(32);not null;->;<-:create"`
+	TraceParent   string `gorm:"size:55;not null;default:'';->;<-:create"`
 	Payload       []byte `gorm:"type:mediumblob;not null;->;<-:create"`
 	PayloadSHA256 string `gorm:"type:char(64);not null;->;<-:create"`
 

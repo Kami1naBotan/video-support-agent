@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/config"
 )
@@ -27,13 +28,22 @@ var (
 )
 
 type Client struct {
-	baseURL    string
-	alias      string
-	httpClient *http.Client
-	transport  *http.Transport
+	baseURL       string
+	alias         string
+	httpClient    *http.Client
+	transport     *http.Transport
+	queryObserver *observability.QueryObserver
 }
 
-func NewClient(cfg config.ElasticsearchConfig) (*Client, error) {
+func NewClient(cfg config.ElasticsearchConfig, observers ...*observability.QueryObserver) (*Client, error) {
+	if len(observers) > 1 {
+		return nil, errors.New("at most one query observer is allowed")
+	}
+
+	var observer *observability.QueryObserver
+	if len(observers) == 1 {
+		observer = observers[0]
+	}
 	if err := config.ValidateElasticsearchConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -69,10 +79,11 @@ func NewClient(cfg config.ElasticsearchConfig) (*Client, error) {
 	}
 
 	return &Client{
-		baseURL:    strings.TrimRight(cfg.URL, "/"),
-		alias:      cfg.IndexAlias,
-		httpClient: httpClient,
-		transport:  transport,
+		baseURL:       strings.TrimRight(cfg.URL, "/"),
+		alias:         cfg.IndexAlias,
+		httpClient:    httpClient,
+		transport:     transport,
+		queryObserver: observer,
 	}, nil
 }
 

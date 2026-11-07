@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"strconv"
 	"time"
+	"video-support-agent/internal/observability"
 
 	"video-support-agent/internal/eventbus"
 	"video-support-agent/internal/knowledgeevent"
@@ -95,6 +96,7 @@ func terminalizeEvent(tx *gorm.DB, event model.KnowledgeEventInbox, outcome stri
 		Topic:         eventbus.TopicIndexEvents,
 		MessageKey:    result.DocumentID,
 		TraceID:       event.TraceID,
+		TraceParent:   observability.CaptureTraceParent(tx.Statement.Context, event.TraceParent),
 		Payload:       payload,
 		PayloadSHA256: hex.EncodeToString(hash[:]),
 		Status:        model.OutboxPending,
