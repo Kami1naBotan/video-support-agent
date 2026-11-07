@@ -12,19 +12,32 @@ services:
       - "127.0.0.1:3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, 'MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -u"$${MYSQL_USER}" -D "$${MYSQL_DATABASE}" --execute="SELECT 1" >/dev/null']
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
   redis:
     image: redis:7.4-alpine
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
   nginx:
-    image: nginx:stable-alpine
+    profiles: [ "app" ]
+    image: video-support-agent-frontend:local
+    build:
+      context: .
+      dockerfile: deploy/docker/frontend.Dockerfile
     ports:
       - "127.0.0.1:8088:80"
-    volumes:
-      - ./frontend/dist:/usr/share/nginx/html:ro
-      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    stop_grace_period: 75s
 
 volumes:
   mysql_data:

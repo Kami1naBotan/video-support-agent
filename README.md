@@ -1,5 +1,7 @@
 # Bilibili 规则智能客服学习项目
 
+阅读导航：项目背景与功能见本页开头；技术栈、当前架构、数据职责、规则知识库后端、RAG 检索、Kafka 异步更新、本地启动、测试、本地知识读取负载样本和当前限制均在本页。容器组合、初始化顺序与 Kubernetes 操作见[部署说明](docs/deployment.md)。
+
 基于 Bilibili 公开规则资料规划的个人学习项目，非官方客服服务。
 
 当前实现用户认证、会话与消息管理、Redis 缓存与限流、Vue 3 客服前端、
@@ -24,7 +26,7 @@ Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
 两类独立搜索 API 保留原有排序和错误语义；聊天通过 HybridService 并行召回、RRF 融合及 MySQL 回源，支持单路故障降级。
 
 前端展示规则引用、历史条款状态、工具执行过程、确认卡片与本人 Run 恢复结果。
-已接入 Kafka 事件驱动的知识库更新与独立 Worker；尚无独立搜索前端、实际 Rerank 模型或 Kubernetes。
+已接入 Kafka 事件驱动的知识库更新与独立 Worker，提供 API/Worker/Frontend 独立镜像与 Helm Chart；已在隔离 Kubernetes 集群验证最小部署、故障恢复及独立扩缩容。尚无独立搜索前端或实际 Rerank 模型。
 
 项目不是 Bilibili 官方客服，不能查询真实账号或向平台办理申诉。
 本地工单只记录本系统申请，不代表平台受理或申诉通过。
@@ -32,7 +34,7 @@ Milvus 搜索使用 Ollama 提供的 bge-m3 稠密向量，
 
 ## 当前技术栈
 
-Go、Gin、GORM、MySQL、Redis、bcrypt、JWT、Zap、Docker Compose。
+Go、Gin、GORM、MySQL、Redis、bcrypt、JWT、Zap、Docker Compose、Kubernetes、Helm。
 Kafka 4.1.1（本地单 broker），Go 客户端统一使用 franz-go v1.22.2。
 Vue 3、TypeScript、Vite、Vue Router、Pinia、Axios、Element Plus、Nginx。
 Eino、Eino OpenAI 兼容模型适配器。
@@ -235,34 +237,15 @@ http://127.0.0.1:8080，并保留原始请求路径。
 
 ### Nginx 构建验收模式
 
-```powershell
-npm --prefix frontend run build
-docker compose up -d nginx
-docker compose exec nginx nginx -t
-```
-
-浏览器访问 http://127.0.0.1:8088。
-
-Nginx 通过只读挂载提供 frontend/dist 中的静态文件，
-将 /api 请求转发到 host.docker.internal:8080。
-该地址适用于当前 Docker Desktop 环境下访问宿主机 Gin。
-
-Gin 仍由 GoLand 启动；Compose 管理 MySQL、Redis 和 Nginx。
-当前不是整个应用的一键容器化部署。
-
-Nginx 模式不依赖 Vite 进程。
-修改前端源码后，需要重新构建并刷新浏览器。
+Nginx 镜像包含构建后的 Vue 静态文件，当前不挂载宿主机 frontend/dist。
+`/api/` 转发到容器网络中的 `api:8080`，不再指向宿主机 Gin。
+请使用[容器与 Kubernetes 部署](docs/deployment.md)中的完整 Compose 文件组合与初始化顺序；只运行基础 Compose 的 nginx 不会创建 API。
+启动成功后访问 http://127.0.0.1:8088。宿主机 GoLand API 联调继续使用上面的 Vite 开发模式。
 
 ### 修改配置后
 
-修改 Nginx 配置：
-
-```powershell
-docker compose exec nginx nginx -t
-docker compose exec nginx nginx -s reload
-```
-
-修改 Go 代码后，需要在 GoLand 中停止并重新运行 API。
+Nginx 配置和前端构建产物均写入镜像，修改后需要重新构建 frontend 镜像并重建 nginx 容器；仅 reload 不能读取宿主机修改。
+容器模式修改 Go 代码后同样需要重建对应镜像并重建容器；宿主机模式需要在 GoLand 中停止并重新运行 API。
 执行 go test 不会更新正在运行的 API 进程。
 
 ### 登录状态
@@ -717,6 +700,29 @@ Retry Topic承载重试通知，不是原地sleep的延迟队列。消费者持�
 
 ## 当前架构
 
+部署层将 API、Worker 和前端分开，事务事实保存在 MySQL，Kafka 传递可重放事件，ES/Milvus 提供派生检索能力：
+
+```mermaid
+flowchart LR
+    Browser[浏览器 Vue] --> Frontend[Nginx / Frontend Pod]
+    Frontend --> API[API Pod]
+    API --> MySQL[(MySQL 业务数据与 Outbox)]
+    API --> Redis[(Redis 缓存与限流)]
+    API --> LLM[Planner / Answer 模型]
+    API --> ES[(Elasticsearch)]
+    API --> MV[(Milvus)]
+    API --> EMB[Embedding]
+    MySQL --> Relay[Worker Outbox Relay]
+    Relay --> Kafka[(Kafka)]
+    Kafka --> Worker[Worker 消费与构建]
+    Worker --> MySQL
+    Worker --> ES
+    Worker --> MV
+    Worker --> EMB
+```
+
+图中箭头表示调用或数据流，不表示跨存储原子事务。API 和 Worker 分别部署和扩缩容；两路索引经校验后通过 MySQL 活动代际控制查询目标。详细 Agent 编排如下。
+
 当前 cmd/api 组装真实消息、工单及审计仓储、确认签名器、五工具和独立 Planner/Answer 模型，
 通过同一个 MessageService.CreateAgent 支持普通 HTTP 与 SSE。
 Vue 经 Vite 或 Nginx 访问 Gin；JWT 提供身份，服务端校验会话归属，客户端不能提供可信身份或历史。
@@ -880,6 +886,8 @@ Embedding 和 Milvus 客户端在 API 启动时不执行远程可用性探测，
 
 ## 数据职责
 
+关系设计：用户拥有会话，会话包含消息；Run/Call 记录 Agent 执行与工具审计，工单与操作 Key 约束独立于聊天消息事务。知识文档拥有多个版本，版本包含条款，条款派生片段；文档当前指针和 publication_revision 管理发布，版本 content_revision 绑定核验。Outbox、Inbox、构建任务与 generation 控制记录协调异步派生索引。具体模型以 `internal/model` 为准，知识表字段与状态说明见本页“规则知识库后端”。
+
 | 组件 | 用途 |
 |---|---|
 | MySQL | 用户、角色、会话、完整消息历史、Agent Run/Call审计、本地工单与业务记录，以及知识库文档、版本、条款、片段、分类和核验记录 |
@@ -1008,7 +1016,7 @@ SSE 开始后的业务错误通过 error 事件报告，不能再修改 HTTP 状
 请求取消通过 Context 传递，不保证已经提交的数据库操作回滚。
 
 HTTP Server 设置连接读写超时。
-服务收到退出信号后停止接收新连接，最多等待 60 秒让在途请求完成。
+API 收到退出信号先撤销 readiness 并等待 5 秒传播窗口，再停止接收新连接，最多等待 60 秒让在途请求完成。
 超过期限时强制关闭 HTTP 连接，再释放 Redis 客户端、MySQL 连接池及日志资源。
 正常等待和关闭超时路径已有本地 HTTP 测试。
 外部强制终止或不响应 Context 的操作不在完整结束保证之内。
@@ -1256,12 +1264,21 @@ DDL、自增序列以及故障清理失败不属于记录回滚保证。
 - Redis 与 MySQL 不保证强一致，没有缓存补偿机制。
 - 普通咨询尚无跨请求幂等键；工单确认使用原操作 Key 幂等创建，同一 Run 的消息对另有唯一约束。
 - 角色变更影响后续检查，不会撤销已经通过检查的在途请求。
-- 已接入 RAG 与工具调用型 Agent；未接 Casbin、Kubernetes。
+- 已接入 RAG、工具调用型 Agent 与 Kubernetes；未接 Casbin，未验证生产高可用、灾备或容量上限。
 - 已有本地知识读取的有限负载样本（见文末）；尚无聊天、SSE、检索或生产容量结论。超时配置不是性能指标。
 - 当前日志提供模型阶段与 Service 阶段耗时，尚未形成首段延迟、取消传播耗时及业务成功率的指标统计。
 - 模型调用成功后数据库仍可能保存失败；模型费用无法随数据库失败回滚。
-- 优雅关闭最多等待 60 秒；超时后强制关闭连接。
+- API 收到退出信号先撤销 readiness，等待 5 秒传播窗口，再执行最多 60 秒的 HTTP Shutdown；超时后强制关闭连接。传播窗口不保证全部在途流量已摘除，60 秒不代表进程所有清理工作的总预算。
 - 外部强制终止或不响应 Context 的操作仍可能导致请求无法完整结束。
+- 2026-11-07前端6项已知依赖审计发现已修复，当前锁文件经官方npm审计为0项；干净安装、115项测试、类型检查、构建与新前端镜像通过。旧隔离集群未自动升级；当前无已知审计发现不等于不存在所有安全风险。依赖限定与维护方式见[前端依赖维护](docs/frontend-dependency-maintenance.md)。
+
+## Kubernetes 部署
+
+入口为 `deploy/helm/video-support-agent`；Namespace 与 Secret 示例位于 `deploy/kubernetes`，四类镜像 Dockerfile 位于 `deploy/docker`。Chart 包含 API/Worker/Frontend Deployment、API/Frontend Service、ConfigMap、可选 Ingress、两个独立 HPA、显式 migrate/seed Job、指标发现 Service 和 NetworkPolicy。
+
+按[部署说明](docs/deployment.md)依次准备依赖和镜像、确认集群身份、提供 Secret 与非敏感配置、执行迁移和分类初始化、启动应用，再验证业务与观测。不要把 Helm 渲染或 Pod Ready 当成规则查询、模型回答和 Kafka 索引链路已经完成。
+
+隔离 Kubernetes 已验证依赖故障恢复、网络允许/拒绝、逐 Pod 指标、SSE/滚动、独立 CPU 扩容和自动缩容后搜索。CPU 压力及模型协议夹具只证明该运行合同；正式来源引用、真实模型、Grafana 和完整演示需分别保留实际结果。
 
 ## Milvus 向量检索
 
@@ -1326,7 +1343,7 @@ MySQL 再检查当前版本指针、版本归属、published 状态、
 回源完成后保持候选顺序，过滤陈旧项，再取 limit。
 过滤后允许结果不足，不无限补搜。
 陈旧过滤可以阻止返回部分失效规则，但无法召回尚未导入 Milvus 的新内容。
-规则发布或修订后，需要人工安排重建，当前没有自动同步。
+当前 API 使用 Worker 发布的活动代际，发布变化由 Kafka/Worker 异步构建并切换；新代际完成前不能保证新内容已可检索。后文 cmd/vector-reindex 是保留的独立 Alias 运维路径，不能用它替代或覆盖 Worker 活动代际管理。
 
 无命中返回成功的空 items 数组。
 依赖失败返回明确错误，不伪装为空结果，也不自动回退 Elasticsearch。
@@ -1668,7 +1685,7 @@ invalid_vector_backend_response（502）；
 
 这些结果只证明对应环境与用例，不代表正式官方规则已经导入，
 也不构成生产召回率、吞吐量、延迟或容量结论。
-聊天已接入 ES/Milvus 混合检索与 RAG；Rerank 仅预留接口，尚未接入实际重排模型、自动同步或独立搜索前端。
+聊天已接入 ES/Milvus 混合检索与 RAG；Kafka/Worker 负责异步同步，Rerank 仅预留接口，尚未接入实际重排模型或独立搜索前端。
 
 ## Elasticsearch 规则检索
 
@@ -1749,7 +1766,7 @@ MySQL 复核依赖发布后内容冻结的约定，检查身份、归属、修�
 旧索引保留，不自动删除；重建由维护者串行执行，没有跨进程分布式锁。
 
 Alias 原子切换只发生在 ES 内部，不构成 ES 与 MySQL 的事务。
-发布、版本切换或下线后需要维护者重建索引，当前没有自动同步或 CDC。
+上述 Alias 流程属于保留的 cmd/reindex 独立运维路径。当前 API 的活动代际由 Kafka/Worker 自动构建与协调发布，不依赖人工切换此 Alias；项目没有使用数据库 CDC。
 
 如果重建期间 MySQL 切换了版本，搜索复核可以剔除旧版候选，
 但无法召回尚未进入 ES 的新版内容。共用查询时刻也不代表两个存储共享快照；
@@ -2232,7 +2249,7 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 
 ## 知识库状态与观测入口
 
-知识库异步链路保留结构化状态日志，API/Worker已接入可选Prometheus指标与OTLP链路。OBS_ENABLED默认false；启用后/metrics使用独立回环监听，API建议9464、Worker显式配置9465。源Outbox发送确认、事件终态、全量任务状态与active代际分别表示不同阶段；管理员deliveries接口仅展示源Outbox。分区lag为offset位置差，不是索引完成度；epoch_gap不是秒数；build_duration_seconds不含最终发布事务。观测采集后等待15秒，最多输出32条最近attempt关联样本，不能将重复样本当作新增完成计数。
+知识库异步链路保留结构化状态日志，API/Worker已接入可选Prometheus指标与OTLP链路。OBS_ENABLED默认false；宿主机默认要求/metrics独立回环监听，API建议9464、Worker显式配置9465；容器通过OBS_METRICS_ALLOW_NON_LOOPBACK=true显式允许非回环监听，当前Compose/Chart均使用各自网络空间的9464。监听许可不提供认证或网络隔离，Kubernetes另由NetworkPolicy约束来源。源Outbox发送确认、事件终态、全量任务状态与active代际分别表示不同阶段；管理员deliveries接口仅展示源Outbox。分区lag为offset位置差，不是索引完成度；epoch_gap不是秒数；build_duration_seconds不含最终发布事务。观测采集后等待15秒，最多输出32条最近attempt关联样本，不能将重复样本当作新增完成计数。
 
 采样失败标记available=false，不用零值掩盖；无提交offset时lag为null。已测量下述知识读取样本；异步构建吞吐、端到端P95及生产容量仍未测定。详细字段、单位、时钟边界及故障处理见[知识库观测说明](docs/knowledge-observability.md)，HTTP状态及投递分页合同见[API文档](docs/api.md)。链路验收覆盖独立进程发布、下线与恢复；指标定义不等于吞吐或延迟基准测试结果。
 
@@ -2251,4 +2268,17 @@ HTTP 模拟演示使用已确认数据库身份的专用环境；
 使用生产路由的原生httptest HTTP进程、隔离MySQL/Redis和Docker host networking运行k6；不包含cmd/api启动或登录。观测导出关闭、访问日志为nop，没有race插桩。每次请求核对文档、版本、条款ID及完整合成内容。
 
 延迟为客户端发送、等待、接收之和，不含建连耗时；301是实际样本数。本次全部请求成功，成功请求与全部HTTP延迟一致。小样本P95/P99不构成生产SLO，未测定瓶颈或最大容量，也不能外推LLM、SSE、检索或大语料性能。更多测量语义见[观测与指标说明](docs/knowledge-observability.md)。
+
+
+## 隔离部署演示补充（2026-11-07）
+
+隔离 Kubernetes 已通过真实模型服务完成官方英文用户协议第2.7条的搜索、详情读取和带引用 SSE 回答，并在浏览器查看保存结果及旧版本被替代后的条款原文。来源网页当日获取并与本地快照核对，仅适用于中国大陆以外用户；entry-001/entry-002是项目录入版本，日期零点UTC+8是项目转换约定。Embedding仍为常量向量协议夹具，本次不证明语义检索质量。
+
+浏览器确认后创建本地人工复核工单，查询状态为pending_review；NoAppealPolicies没有被替换，不代表平台受理或真实申诉资格通过。管理员通过HTTP发布录入修订，Kafka/Worker完成双索引切换。Grafana曾显示API/Worker两条up=1曲线，证明当时抓取可用，不证明全部业务面板或告警有效。
+
+演示后临时真实模型代理已停止，API恢复原隔离夹具配置。保留的客服页面可查看历史结果，新提问不再调用真实模型。原隔离集群和依赖保留，不能按生产部署理解。无新增性能容量结论。
+
+
+## 当前版本定位
+本版本为已收尾的本地测试版；Git提交不属于本次验收范围，建议目录见[提交范围](docs/submission-scope.md)。prompt15至prompt26的开发目标留到下一版本，不纳入本版关闭条件。当前进入项目总结、复习与后端实习面试准备，不宣称生产上线。
 

@@ -1,0 +1,24 @@
+{{- if eq .Values.config.common.OBS_ENABLED "true" }}
+{{ range $role := list "api" "worker" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-%s-metrics" $.Release.Name $role }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: video-support-agent
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/component: {{ $role }}
+  ports:
+    - name: metrics
+      port: 9464
+      targetPort: metrics
+{{ end }}
+{{- end }}

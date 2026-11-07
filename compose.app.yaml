@@ -1,0 +1,155 @@
+x-database-env: &database-env
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_USER: bili_app
+  DB_PASSWORD: ${MYSQL_PASSWORD:?required}
+  DB_NAME: bili_support
+
+x-knowledge-env: &knowledge-env
+  <<: *database-env
+  APP_ENV: production
+  LOG_LEVEL: info
+  ES_URL: http://elasticsearch:9200
+  ES_INDEX_ALIAS: ${ES_INDEX_ALIAS:-rule_chunks_current}
+  ES_TIMEOUT: ${ES_TIMEOUT:-5s}
+  MILVUS_URL: http://standalone:19530
+  MILVUS_DATABASE: ${MILVUS_DATABASE:-default}
+  MILVUS_COLLECTION_ALIAS: ${MILVUS_COLLECTION_ALIAS:-rule_chunks_vector_current}
+  MILVUS_TIMEOUT: ${MILVUS_TIMEOUT:-5s}
+  EMBEDDING_URL: ${CONTAINER_EMBEDDING_URL:-http://host.docker.internal:11434}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-bge-m3:567m}
+  EMBEDDING_MODEL_DIGEST: ${EMBEDDING_MODEL_DIGEST:-7907646426070047a77226ac3e684fbbe8410524f7b4a74d02837e43f2146bab}
+  EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
+  EMBEDDING_CONTEXT_LENGTH: ${EMBEDDING_CONTEXT_LENGTH:-8192}
+  EMBEDDING_TIMEOUT: ${EMBEDDING_TIMEOUT:-60s}
+  KNOWLEDGE_SOURCE_SERVER_UUID: ${KNOWLEDGE_SOURCE_SERVER_UUID:-}
+  OBS_ENABLED: ${CONTAINER_OBS_ENABLED:-false}
+  OBS_SERVICE_NAME: ${OBS_SERVICE_NAME:-video-support-agent}
+  OBS_OTLP_ENDPOINT: ${CONTAINER_OBS_OTLP_ENDPOINT:-}
+  OBS_SAMPLE_RATIO: ${OBS_SAMPLE_RATIO:-1}
+  OBS_METRICS_ADDR: "0.0.0.0:9464"
+  OBS_METRICS_ALLOW_NON_LOOPBACK: "true"
+
+services:
+  api:
+    profiles: [ "app" ]
+    image: video-support-agent-api:local
+    build:
+      context: .
+      dockerfile: deploy/docker/api.Dockerfile
+    environment:
+      <<: *knowledge-env
+      APP_PORT: "8080"
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ""
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_ISSUER: ${JWT_ISSUER:-bili-support}
+      JWT_TTL: ${JWT_TTL:-2h}
+      APPEAL_CONFIRMATION_KEY_BASE64: ${APPEAL_CONFIRMATION_KEY_BASE64:-}
+      APPEAL_CONFIRMATION_ISSUER: ${APPEAL_CONFIRMATION_ISSUER:-video-support-agent-appeal}
+      APPEAL_CONFIRMATION_AUDIENCE: ${APPEAL_CONFIRMATION_AUDIENCE:-video-support-agent-appeal-create}
+      LLM_BASE_URL: ${CONTAINER_LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-30s}
+      TRUSTED_PROXIES: ${CONTAINER_TRUSTED_PROXIES:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      standalone:
+        condition: service_healthy
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 75s
+
+  worker:
+    profiles: [ "app" ]
+    image: video-support-agent-worker:local
+    build:
+      context: .
+      dockerfile: deploy/docker/worker.Dockerfile
+    environment:
+      <<: *knowledge-env
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: knowledge-worker
+      KAFKA_CONNECT_TIMEOUT: ${KAFKA_CONNECT_TIMEOUT:-5s}
+      KAFKA_REQUEST_TIMEOUT: ${KAFKA_REQUEST_TIMEOUT:-10s}
+      KAFKA_DELIVERY_TIMEOUT: ${KAFKA_DELIVERY_TIMEOUT:-30s}
+      KAFKA_SHUTDOWN_TIMEOUT: ${KAFKA_SHUTDOWN_TIMEOUT:-30s}
+      KNOWLEDGE_SOURCE_GROUP: ${KNOWLEDGE_SOURCE_GROUP:-knowledge-index-worker-v1}
+      KNOWLEDGE_RETRY_GROUP: ${KNOWLEDGE_RETRY_GROUP:-knowledge-index-retry-worker-v1}
+      KNOWLEDGE_GENERATION_LIMIT: ${KNOWLEDGE_GENERATION_LIMIT:-100}
+      KNOWLEDGE_ES_DEFINITION: /app/deploy/elasticsearch/rule-chunks-v1.json
+      WORKER_PROBE_ADDR: "0.0.0.0:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      standalone:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 75s
+
+  migrate:
+    profiles: ["ops"]
+    image: video-support-agent-ops:local
+    build:
+      context: .
+      dockerfile: deploy/docker/ops.Dockerfile
+    command: ["/app/migrate"]
+    environment:
+      <<: *database-env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  seed:
+    profiles: ["ops"]
+    image: video-support-agent-ops:local
+    command: ["/app/seed"]
+    environment:
+      <<: *database-env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  nginx:
+    depends_on:
+      api:
+        condition: service_started
+
+  minio:
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?required}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?required}
+
+  standalone:
+    environment:
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?required}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?required}

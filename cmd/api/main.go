@@ -33,6 +33,7 @@ import (
 
 const (
 	shutdownTimeout        = 60 * time.Second
+	readinessDrainDelay    = 5 * time.Second
 	vectorRetrievalTimeout = 35 * time.Second
 )
 
@@ -261,6 +262,18 @@ func run() error {
 		messageHandler,
 		httpObservation,
 	)
+
+	probes := newAPIProbes(func(ctx context.Context) error {
+		if err := sqlDB.PingContext(ctx); err != nil {
+			return err
+		}
+
+		return redisClient.Ping(ctx).Err()
+	})
+
+	r.GET("/livez", gin.WrapF(probes.Live))
+	r.GET("/readyz", gin.WrapF(probes.Ready))
+
 	appLogger.Info("starting API server")
 	appLogger.Info("server configuration",
 		zap.String("app_name", cfg.AppName),
@@ -291,6 +304,8 @@ func run() error {
 
 	select {
 	case err := <-serverErrors:
+		probes.BeginDrain()
+
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			stopReason = errors.New("HTTP server failed; check listen address and port")
 		}
@@ -298,12 +313,19 @@ func run() error {
 			return errors.Join(stopReason, err)
 		}
 		return stopReason
+
 	case err := <-metricsServer.Errors():
 		stopReason = err
 		stop()
+
 	case <-signalCtx.Done():
 		stop()
 	}
+
+	probes.BeginDrain()
+	appLogger.Info("API readiness disabled; waiting for traffic drain", zap.Duration("delay", readinessDrainDelay))
+
+	time.Sleep(readinessDrainDelay)
 
 	appLogger.Info("shutting down API server")
 

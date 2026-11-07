@@ -1,0 +1,37 @@
+{{- if .Values.workloadsEnabled }}
+{{ range $role := list "api" "worker" }}
+{{- $hpa := index $.Values.autoscaling $role }}
+{{- if $hpa.enabled }}
+{{- if or
+  (lt (int $hpa.minReplicas) 1)
+  (lt (int $hpa.maxReplicas) (int $hpa.minReplicas))
+  (lt (int $hpa.targetCPUUtilizationPercentage) 1)
+}}
+{{- fail (printf "invalid autoscaling settings for %s" $role) }}
+{{- end }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ printf "%s-%s" $.Release.Name $role }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ printf "%s-%s" $.Release.Name $role }}
+  minReplicas: {{ $hpa.minReplicas }}
+  maxReplicas: {{ $hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $hpa.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+{{- end }}
+{{ end }}
+{{- end }}

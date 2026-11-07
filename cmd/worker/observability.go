@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"strings"
 	"time"
 
 	"video-support-agent/internal/config"
@@ -14,6 +16,7 @@ import (
 type workerObservation struct {
 	Async   *observability.AsyncObserver
 	Runtime *observability.Runtime
+	Probes  *workerProbes
 }
 
 func runObservedWorker(ctx context.Context, cfg config.Config, log *zap.Logger) error {
@@ -45,12 +48,30 @@ func runObservedWorker(ctx context.Context, cfg config.Config, log *zap.Logger) 
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	probeAddr := strings.TrimSpace(os.Getenv("WORKER_PROBE_ADDR"))
+	if probeAddr == "" {
+		probeAddr = "127.0.0.1:8081"
+	}
+
+	probes, err := startWorkerProbes(workCtx, probeAddr)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := probes.Shutdown(); err != nil {
+			log.Warn("worker probe shutdown incomplete")
+		}
+	}()
+
 	result := make(chan error, 1)
 	go func() {
-		result <- runWorker(workCtx, cfg, log, workerObservation{
+		err := runWorker(workCtx, cfg, log, workerObservation{
 			Async:   asyncObserver,
 			Runtime: obs,
+			Probes:  probes,
 		})
+		probes.BeginDrain()
+		result <- err
 	}()
 
 	var stopReason error
@@ -60,9 +81,12 @@ func runObservedWorker(ctx context.Context, cfg config.Config, log *zap.Logger) 
 		return err
 	case err := <-metricsServer.Errors():
 		stopReason = err
+	case err := <-probes.Errors():
+		stopReason = err
 	case <-ctx.Done():
 	}
 
+	probes.BeginDrain()
 	cancel()
 
 	timer := time.NewTimer(65 * time.Second)

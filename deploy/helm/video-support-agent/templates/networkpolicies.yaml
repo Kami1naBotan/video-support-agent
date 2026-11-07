@@ -1,0 +1,77 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- if .Values.ingress.enabled }}
+{{- if or
+  (empty .Values.networkPolicy.ingressNamespace)
+  (empty .Values.networkPolicy.ingressPodLabels)
+}}
+{{- fail "enabled ingress requires its controller namespace and Pod labels" }}
+{{- end }}
+{{- end }}
+{{- $metrics := eq .Values.config.common.OBS_ENABLED "true" }}
+{{- if $metrics }}
+{{- if or (empty .Values.monitoring.namespace) (empty .Values.monitoring.podLabels) }}
+{{- fail "enabled observability requires monitoring namespace and Pod labels" }}
+{{- end }}
+{{- end }}
+
+{{ range $role := list "api" "worker" "frontend" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-%s-ingress" $.Release.Name $role }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+      app.kubernetes.io/component: {{ $role }}
+  policyTypes:
+    - Ingress
+  {{- if or
+    (eq $role "api")
+    (and (eq $role "worker") $metrics)
+    (and (eq $role "frontend") $.Values.ingress.enabled)
+  }}
+  ingress:
+    {{- if eq $role "api" }}
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+              app.kubernetes.io/component: frontend
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+
+    {{- if and (eq $role "frontend") $.Values.ingress.enabled }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.networkPolicy.ingressNamespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $.Values.networkPolicy.ingressPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 80
+    {{- end }}
+
+    {{- if and (ne $role "frontend") $metrics }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $.Values.monitoring.namespace | quote }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $.Values.monitoring.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 9464
+    {{- end }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{ end }}
+{{- end }}

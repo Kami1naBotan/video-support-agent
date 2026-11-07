@@ -1,0 +1,161 @@
+workloadsEnabled: true
+
+# Change this non-secret marker after rotating externally managed Secrets.
+secretRevision: "initial"
+
+images:
+  api:
+    repository: video-support-agent-api
+    tag: local
+  worker:
+    repository: video-support-agent-worker
+    tag: local
+  frontend:
+    repository: video-support-agent-frontend
+    tag: local
+  ops:
+    repository: video-support-agent-ops
+    tag: local
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicas:
+  api: 1
+  worker: 1
+  frontend: 1
+
+resources:
+  api:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  worker:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  frontend:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 500m
+      memory: 128Mi
+  ops:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+terminationGracePeriodSeconds: 90
+
+autoscaling:
+  api:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+  worker:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 70
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tlsSecretName: ""
+
+operations:
+  migrate: false
+  seed: false
+  runId: ""
+secrets:
+  database: video-support-agent-database
+  api: video-support-agent-api
+
+config:
+  database:
+    DB_HOST: ""
+    DB_PORT: "3306"
+    DB_USER: "bili_app"
+    DB_NAME: "bili_support"
+
+  common:
+    APP_ENV: "production"
+    LOG_LEVEL: "info"
+
+    ES_URL: ""
+    ES_INDEX_ALIAS: "rule_chunks_current"
+    ES_TIMEOUT: "5s"
+
+    MILVUS_URL: ""
+    MILVUS_DATABASE: "default"
+    MILVUS_COLLECTION_ALIAS: "rule_chunks_vector_current"
+    MILVUS_TIMEOUT: "5s"
+
+    EMBEDDING_URL: ""
+    EMBEDDING_MODEL: "bge-m3:567m"
+    EMBEDDING_MODEL_DIGEST: ""
+    EMBEDDING_DIMENSIONS: "1024"
+    EMBEDDING_CONTEXT_LENGTH: "8192"
+    EMBEDDING_TIMEOUT: "60s"
+
+    KNOWLEDGE_SOURCE_SERVER_UUID: ""
+
+    OBS_ENABLED: "false"
+    OBS_SERVICE_NAME: "video-support-agent"
+    OBS_OTLP_ENDPOINT: ""
+    OBS_SAMPLE_RATIO: "1"
+    OBS_METRICS_ADDR: "0.0.0.0:9464"
+    OBS_METRICS_ALLOW_NON_LOOPBACK: "true"
+
+  api:
+    APP_PORT: "8080"
+    REDIS_ADDR: ""
+    JWT_ISSUER: "bili-support"
+    JWT_TTL: "2h"
+
+    APPEAL_CONFIRMATION_ISSUER: "video-support-agent-appeal"
+    APPEAL_CONFIRMATION_AUDIENCE: "video-support-agent-appeal-create"
+
+    LLM_BASE_URL: ""
+    LLM_MODEL: ""
+    LLM_TIMEOUT: "30s"
+
+    TRUSTED_PROXIES: ""
+
+  worker:
+    WORKER_PROBE_ADDR: "0.0.0.0:8081"
+
+    KAFKA_BROKERS: ""
+    KAFKA_CLIENT_ID: "knowledge-worker"
+    KAFKA_CONNECT_TIMEOUT: "5s"
+    KAFKA_REQUEST_TIMEOUT: "10s"
+    KAFKA_DELIVERY_TIMEOUT: "30s"
+    KAFKA_SHUTDOWN_TIMEOUT: "30s"
+
+    KNOWLEDGE_SOURCE_GROUP: "knowledge-index-worker-v1"
+    KNOWLEDGE_RETRY_GROUP: "knowledge-index-retry-worker-v1"
+    KNOWLEDGE_GENERATION_LIMIT: "100"
+    KNOWLEDGE_ES_DEFINITION: "/app/deploy/elasticsearch/rule-chunks-v1.json"
+
+networkPolicy:
+  enabled: true
+  ingressNamespace: ""
+  ingressPodLabels:
+    app.kubernetes.io/component: controller
+
+monitoring:
+  namespace: ""
+  podLabels:
+    app.kubernetes.io/name: prometheus

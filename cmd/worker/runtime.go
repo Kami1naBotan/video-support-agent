@@ -229,7 +229,7 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger,
 		zap.Uint64("generation_limit", settings.GenerationLimit),
 		zap.Int("runtime_units", 7))
 
-	deadline, runErr = runWorkerUnits(ctx, []workerUnit{
+	deadline, runErr = runWorkerUnitsWithProbes(ctx, []workerUnit{
 		{
 			name: "outbox_relay",
 			run:  relay.Run,
@@ -248,15 +248,21 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger,
 		},
 		{
 			name: "generation_builder",
-			run:  runtime.RunBuilds,
+			run: func(ctx context.Context) error {
+				return retryKnowledgeLoop(ctx, "generation_builder", runtime.RunBuilds, log)
+			},
 		},
 		{
 			name: "event_settlement",
-			run:  runtime.RunSettlements,
+			run: func(ctx context.Context) error {
+				return retryKnowledgeLoop(ctx, "event_settlement", runtime.RunSettlements, log)
+			},
 		},
 		{
 			name: "build_recovery",
-			run:  runtime.RunRecoveries,
+			run: func(ctx context.Context) error {
+				return retryKnowledgeLoop(ctx, "build_recovery", runtime.RunRecoveries, log)
+			},
 		},
 		{
 			name: "knowledge_observation",
@@ -264,6 +270,34 @@ func runKnowledgeWorker(ctx context.Context, cfg config.Config, log *zap.Logger,
 				return knowledgeworker.RunObservations(ctx, buildStore, producer, log, lagTargets, lagMetrics)
 			},
 		},
-	})
+	}, observation.Probes)
 	return runErr
+}
+
+func retryKnowledgeLoop(ctx context.Context, name string, run func(context.Context) error, log *zap.Logger) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err := run(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if !errors.Is(err, knowledgeworker.ErrBuildStore) {
+			return err
+		}
+
+		log.Warn("knowledge loop waiting for persistence",
+			zap.String("unit", name),
+			zap.String("code", "persistence_unconfirmed"))
+
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }

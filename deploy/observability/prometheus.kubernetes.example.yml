@@ -1,0 +1,32 @@
+# Example scrape jobs for release "support", namespace "video-support-agent".
+# Merge these entries into the actual Prometheus scrape_configs.
+# Prometheus must run with matching NetworkPolicy namespace/Pod labels.
+
+scrape_configs:
+  - job_name: video-support-agent-api
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 3s
+    dns_sd_configs:
+      - names:
+          - support-api-metrics.video-support-agent.svc.cluster.local
+        type: A
+        port: 9464
+    static_configs: []
+    relabel_configs:
+      - target_label: process_role
+        replacement: api
+
+  - job_name: video-support-agent-worker
+    metrics_path: /metrics
+    scrape_interval: 15s
+    scrape_timeout: 3s
+    dns_sd_configs:
+      - names:
+          - support-worker-metrics.video-support-agent.svc.cluster.local
+        type: A
+        port: 9464
+    static_configs: []
+    relabel_configs:
+      - target_label: process_role
+        replacement: worker

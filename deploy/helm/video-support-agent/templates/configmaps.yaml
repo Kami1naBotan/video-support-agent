@@ -1,0 +1,46 @@
+{{- if gt (len .Release.Name) 40 -}}
+{{- fail "release name must not exceed 40 characters" -}}
+{{- end -}}
+
+{{- $required := dict
+  "database" (list "DB_HOST" "DB_PORT" "DB_USER" "DB_NAME")
+  "common" (list "ES_URL" "MILVUS_URL" "EMBEDDING_URL" "EMBEDDING_MODEL_DIGEST" "KNOWLEDGE_SOURCE_SERVER_UUID")
+  "api" (list "REDIS_ADDR" "LLM_BASE_URL" "LLM_MODEL")
+  "worker" (list "KAFKA_BROKERS")
+-}}
+
+{{- range $group, $keys := $required -}}
+  {{- $env := index $.Values.config $group -}}
+  {{- range $key := $keys -}}
+    {{- $value := index $env $key -}}
+    {{- if empty $value -}}
+      {{- fail (printf "config.%s.%s is required" $group $key) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}
+
+{{- if eq .Values.config.common.OBS_ENABLED "true" -}}
+  {{- if empty .Values.config.common.OBS_OTLP_ENDPOINT -}}
+    {{- fail "config.common.OBS_OTLP_ENDPOINT is required when observability is enabled" -}}
+  {{- end -}}
+{{- end -}}
+
+{{ range $group := list "database" "common" "api" "worker" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-config-%s" $.Release.Name $group }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: video-support-agent
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/managed-by: {{ $.Release.Service | quote }}
+data:
+{{- range $key, $value := index $.Values.config $group }}
+  {{- if not (kindIs "string" $value) }}
+    {{- fail (printf "config.%s.%s must be a string" $group $key) }}
+  {{- end }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{ end }}

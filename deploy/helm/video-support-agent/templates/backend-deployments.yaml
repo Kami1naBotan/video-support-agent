@@ -1,0 +1,152 @@
+{{- if .Values.workloadsEnabled }}
+{{- if ne .Values.config.api.APP_PORT "8080" }}
+{{- fail "config.api.APP_PORT must be 8080 for this chart" }}
+{{- end }}
+{{- if ne .Values.config.worker.WORKER_PROBE_ADDR "0.0.0.0:8081" }}
+{{- fail "config.worker.WORKER_PROBE_ADDR must be 0.0.0.0:8081" }}
+{{- end }}
+{{- if lt (int .Values.terminationGracePeriodSeconds) 90 }}
+{{- fail "terminationGracePeriodSeconds must be at least 90" }}
+{{- end }}
+{{- if eq .Values.config.common.OBS_ENABLED "true" }}
+{{- if or
+  (ne .Values.config.common.OBS_METRICS_ADDR "0.0.0.0:9464")
+  (ne .Values.config.common.OBS_METRICS_ALLOW_NON_LOOPBACK "true")
+}}
+{{- fail "enabled container metrics require 0.0.0.0:9464 and explicit non-loopback permission" }}
+{{- end }}
+{{- end }}
+{{ range $role := list "api" "worker" }}
+{{- $image := index $.Values.images $role }}
+{{- $autoscaling := index $.Values.autoscaling $role }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-%s" $.Release.Name $role }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: video-support-agent
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/component: {{ $role }}
+spec:
+  {{- if not $autoscaling.enabled }}
+  replicas: {{ index $.Values.replicas $role }}
+  {{- end }}
+  revisionHistoryLimit: 3
+  minReadySeconds: 5
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+      app.kubernetes.io/component: {{ $role }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: video-support-agent
+        app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+        app.kubernetes.io/component: {{ $role }}
+      annotations:
+        checksum/config: {{ dict "database" $.Values.config.database "common" $.Values.config.common "role" (index $.Values.config $role) | toJson | sha256sum | quote }}
+        deployment/secret-revision: {{ $.Values.secretRevision | quote }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $.Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $role }}
+          image: {{ printf "%s:%s" $image.repository $image.tag | quote }}
+          imagePullPolicy: {{ $.Values.images.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: {{ printf "%s-config-database" $.Release.Name }}
+            - configMapRef:
+                name: {{ printf "%s-config-common" $.Release.Name }}
+            - configMapRef:
+                name: {{ printf "%s-config-%s" $.Release.Name $role }}
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.database is required" $.Values.secrets.database | quote }}
+                  key: DB_PASSWORD
+            {{- if eq $role "api" }}
+            {{- range $key := list "JWT_SECRET" "APPEAL_CONFIRMATION_KEY_BASE64" "LLM_API_KEY" "REDIS_PASSWORD" }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.api is required" $.Values.secrets.api | quote }}
+                  key: {{ $key }}
+            {{- end }}
+            {{- end }}
+          ports:
+            {{- if eq $role "api" }}
+            - name: http
+              containerPort: 8080
+            {{- else }}
+            - name: health
+              containerPort: 8081
+            {{- end }}
+            {{- if eq $.Values.config.common.OBS_ENABLED "true" }}
+            - name: metrics
+              containerPort: 9464
+            {{- end }}
+          resources:
+            {{- toYaml (index $.Values.resources $role) | nindent 12 }}
+          startupProbe:
+            httpGet:
+              {{- if eq $role "api" }}
+              path: /livez
+              port: http
+              {{- else }}
+              path: /readyz
+              port: health
+              {{- end }}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              {{- if eq $role "api" }}
+              port: http
+              {{- else }}
+              port: health
+              {{- end }}
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 1
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /livez
+              {{- if eq $role "api" }}
+              port: http
+              {{- else }}
+              port: health
+              {{- end }}
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+{{ end }}
+{{- end }}

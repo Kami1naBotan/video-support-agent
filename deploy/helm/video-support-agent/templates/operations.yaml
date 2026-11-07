@@ -1,0 +1,70 @@
+{{- $ops := .Values.operations | default dict }}
+{{- if or $ops.migrate $ops.seed }}
+{{- if .Values.workloadsEnabled }}
+{{- fail "operations require workloadsEnabled=false" }}
+{{- end }}
+{{- if and $ops.migrate $ops.seed }}
+{{- fail "run migrate and seed separately" }}
+{{- end }}
+{{- $runId := required "operations.runId is required" $ops.runId | toString }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,10}[a-z0-9])?$" $runId) }}
+{{- fail "operations.runId must contain 1-12 lowercase letters, digits or hyphens, starting and ending with a letter or digit" }}
+{{- end }}
+{{- $operation := ternary "migrate" "seed" $ops.migrate }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-%s-%s" .Release.Name $operation $runId | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/name: video-support-agent
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/component: {{ $operation }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: {{ $operation }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ $operation }}
+          image: {{ printf "%s:%s" .Values.images.ops.repository .Values.images.ops.tag | quote }}
+          imagePullPolicy: {{ .Values.images.pullPolicy }}
+          command:
+            - {{ printf "/app/%s" $operation | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: {{ printf "%s-config-database" .Release.Name }}
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "secrets.database is required" .Values.secrets.database | quote }}
+                  key: DB_PASSWORD
+          {{- with .Values.resources.ops }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}

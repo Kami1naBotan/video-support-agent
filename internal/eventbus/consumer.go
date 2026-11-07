@@ -20,6 +20,7 @@ var (
 	ErrConsumerFetch  = errors.New("consumer fetch failed")
 	ErrConsumerStore  = errors.New("consumer durable handler failed")
 	ErrConsumerCommit = errors.New("consumer offset commit unconfirmed")
+	ErrConsumerClosed = errors.New("consumer client closed")
 )
 
 var consumerGroupPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
@@ -103,7 +104,20 @@ func (c *Consumer) Run(ctx context.Context, handle DurableHandler) (runErr error
 			return err
 		}
 		if err := consumeOne(ctx, client, handle); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if !errors.Is(err, ErrConsumerFetch) {
+				return err
+			}
+
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 }
@@ -115,11 +129,15 @@ func consumeOne(ctx context.Context, client *Client, handle DurableHandler) erro
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if fetches.IsClientClosed() || len(fetches.Errors()) != 0 {
-		return ErrConsumerFetch
+	if fetches.IsClientClosed() {
+		return ErrConsumerClosed
 	}
+
 	iter := fetches.RecordIter()
 	if iter.Done() {
+		if len(fetches.Errors()) != 0 {
+			return ErrConsumerFetch
+		}
 		return nil
 	}
 	record := iter.Next()

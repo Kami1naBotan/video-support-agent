@@ -46,8 +46,16 @@ func workerCancellationOnly(err error) bool {
 }
 
 func runWorkerUnits(ctx context.Context, units []workerUnit) (time.Time, error) {
+	return runWorkerUnitsWithProbes(ctx, units, nil)
+}
+
+func runWorkerUnitsWithProbes(ctx context.Context, units []workerUnit, probes *workerProbes) (time.Time, error) {
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	if probes != nil {
+		defer probes.BeginDrain()
+	}
 
 	results := make(chan workerUnitResult, len(units))
 	for _, unit := range units {
@@ -57,6 +65,10 @@ func runWorkerUnits(ctx context.Context, units []workerUnit) (time.Time, error) 
 				err:  unit.run(workCtx),
 			}
 		}(unit)
+	}
+
+	if probes != nil {
+		probes.MarkRunning()
 	}
 
 	remaining := len(units)
@@ -71,6 +83,10 @@ func runWorkerUnits(ctx context.Context, units []workerUnit) (time.Time, error) 
 		} else if result.err != nil && !workerCancellationOnly(result.err) {
 			runErr = errors.New(result.name + "_failed")
 		}
+	}
+
+	if probes != nil {
+		probes.BeginDrain()
 	}
 
 	deadline := time.Now().Add(30 * time.Second)
